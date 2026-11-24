@@ -43,17 +43,21 @@ async function show(
 }
 
 function section(title: string, detail?: string): string {
-  return `🏛 AGR Study\n━━━━━━━━━━━━━━\n${title}${detail ? `\n\n${detail}` : ""}`;
+  return `AGR Study\n━━━━━━━━━━━━━━\n${title}${detail ? `\n\n${detail}` : ""}`;
 }
 
 function navigation(back?: string): InlineKeyboard {
   return withNavigation(new InlineKeyboard(), back);
 }
 
+function adminNavigation(back?: string): InlineKeyboard {
+  return withNavigation(new InlineKeyboard(), back, "adm:home");
+}
+
 async function sendHome(ctx: Context): Promise<void> {
   const from = ctx.from;
   if (from) await users.clearState(from.id);
-  const levels = await content.levels();
+  const levels = await content.currentLevels();
   const detail = levels.length
     ? "اختر الفرقة لبدء التصفح، أو استخدم البحث للوصول إلى مادة أو ملف بسرعة."
     : "المحتوى الأكاديمي قيد الإعداد. يمكنك استكشاف الأرشيف أو معلومات المنصة والتواصل مع الإدارة.";
@@ -132,10 +136,13 @@ bot.command("admin", async (ctx) => {
 
 bot.command("cancel", async (ctx) => {
   if (ctx.from) await users.clearState(ctx.from.id);
+  const keyboard = isAdmin(ctx.from?.id)
+    ? adminNavigation("adm:home")
+    : navigation("nav:home");
   await show(
     ctx,
     section("تم إلغاء العملية", "يمكنك العودة للقائمة واختيار إجراء آخر."),
-    navigation("nav:home"),
+    keyboard,
   );
 });
 
@@ -180,7 +187,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
   if (area === "nav" && action === "archive" && Number.isSafeInteger(id)) {
     const year = await content.archiveYear(id);
     if (!year) return sendHome(ctx);
-    const levels = await content.levels(id);
+    const levels = await content.archivedLevels(id);
     return show(
       ctx,
       section(
@@ -199,6 +206,13 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
   ) {
     const level = await content.level(id);
     if (!level || !level.active) return sendHome(ctx);
+    if (
+      (action === "l" &&
+        (level.is_archived || level.archive_year_id !== null)) ||
+      (action === "al" &&
+        (!level.is_archived || level.archive_year_id === null))
+    )
+      return sendHome(ctx);
     const terms = await content.terms(id);
     const back =
       level.archive_year_id === null
@@ -324,7 +338,12 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
       const term = preferred.termId
         ? await content.term(preferred.termId)
         : undefined;
-      if (level?.active && (preferred.termId === null || term?.active)) {
+      if (
+        level?.active &&
+        !level.is_archived &&
+        level.archive_year_id === null &&
+        (preferred.termId === null || term?.active)
+      ) {
         const keyboard = navigation("nav:home");
         keyboard.row().text("✏️ تغيير الفرقة أو الفصل", "my:choose");
         const current = term ? `${level.title} · ${term.title}` : level.title;
@@ -341,7 +360,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
         );
       }
     }
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section(
@@ -352,7 +371,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     );
   }
   if (data === "my:choose") {
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section("تغيير فرقتي الحالية", "اختر فرقتك ثم الفصل الدراسي الذي تفضله."),
@@ -361,7 +380,8 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
   }
   if (area === "my" && action === "l" && Number.isSafeInteger(id)) {
     const level = await content.level(id);
-    if (!level?.active || level.archive_year_id !== null) return sendHome(ctx);
+    if (!level?.active || level.is_archived || level.archive_year_id !== null)
+      return sendHome(ctx);
     const terms = await content.terms(id);
     const keyboard = termsKeyboard(terms, "my:t", "nav:my");
     keyboard.row().text("حفظ الفرقة فقط", `my:skip:${id}`);
@@ -500,7 +520,9 @@ async function showAdmin(ctx: Context): Promise<void> {
     .row()
     .text("📣 إرسال إعلان", "adm:broadcast")
     .row()
-    .text(labels.main, "nav:home");
+    .text("🧑‍🎓 واجهة الطلاب", "adm:student")
+    .row()
+    .text(labels.main, "adm:home");
   await show(
     ctx,
     section(
@@ -512,7 +534,7 @@ async function showAdmin(ctx: Context): Promise<void> {
 }
 
 async function showAdminLevels(ctx: Context): Promise<void> {
-  const levels = await content.levels(null, false);
+  const levels = await content.currentLevels(false);
   const keyboard = new InlineKeyboard();
   keyboard.text("＋ إضافة فرقة", "adm:addlevel").row();
   for (const level of levels) {
@@ -522,7 +544,7 @@ async function showAdminLevels(ctx: Context): Promise<void> {
       .row();
     keyboard.text("✏️ إعادة تسمية", `adm:rename:level:${level.id}`).row();
   }
-  withNavigation(keyboard, "adm:home");
+  withNavigation(keyboard, "adm:home", "adm:home");
   await show(
     ctx,
     section("إدارة الفرق", "يمكنك إخفاء فرقة من قائمة الطلاب دون حذف محتواها."),
@@ -534,18 +556,24 @@ async function showAdminLevel(ctx: Context, levelId: number): Promise<void> {
   const level = await content.level(levelId);
   if (!level) return showAdminLevels(ctx);
   const terms = await content.terms(levelId, false);
+  const archived = level.is_archived && level.archive_year_id !== null;
+  const termCallback = archived ? "adm:atm" : "adm:tm";
   const keyboard = new InlineKeyboard()
     .text("＋ إضافة فصل", `adm:addterm:${levelId}`)
     .row();
   for (const term of terms) {
     keyboard
-      .text(term.title, `adm:tm:${term.id}`)
+      .text(term.title, `${termCallback}:${term.id}`)
       .text(term.active ? "إخفاء" : "إظهار", `adm:hideterm:${term.id}`)
       .row();
     keyboard.text("✏️ إعادة تسمية الفصل", `adm:rename:term:${term.id}`).row();
   }
   keyboard.text("✏️ إعادة تسمية الفرقة", `adm:rename:level:${levelId}`).row();
-  withNavigation(keyboard, "adm:levels");
+  const back =
+    level.archive_year_id === null
+      ? "adm:levels"
+      : `adm:year:${level.archive_year_id}`;
+  withNavigation(keyboard, back, "adm:home");
   await show(
     ctx,
     section(
@@ -559,13 +587,18 @@ async function showAdminLevel(ctx: Context, levelId: number): Promise<void> {
 async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
   const term = await content.term(termId);
   if (!term) return showAdminLevels(ctx);
+  const level = await content.level(term.level_id);
+  const archived = Boolean(
+    level?.is_archived && level.archive_year_id !== null,
+  );
+  const courseCallback = archived ? "adm:acr" : "adm:cr";
   const courses = await content.courses(termId, false);
   const keyboard = new InlineKeyboard()
     .text("＋ إضافة مقرر", `adm:addcourse:${termId}`)
     .row();
   for (const course of courses) {
     keyboard
-      .text(course.title, `adm:cr:${course.id}`)
+      .text(course.title, `${courseCallback}:${course.id}`)
       .text(course.active ? "إخفاء" : "إظهار", `adm:hidecourse:${course.id}`)
       .row();
     keyboard
@@ -573,7 +606,13 @@ async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
       .row();
   }
   keyboard.text("✏️ إعادة تسمية الفصل", `adm:rename:term:${termId}`).row();
-  withNavigation(keyboard, `adm:lv:${term.level_id}`);
+  withNavigation(
+    keyboard,
+    archived && level?.archive_year_id !== null
+      ? `adm:alv:${term.level_id}`
+      : `adm:lv:${term.level_id}`,
+    "adm:home",
+  );
   await show(
     ctx,
     section(
@@ -587,12 +626,21 @@ async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
 async function showAdminCourse(ctx: Context, courseId: number): Promise<void> {
   const course = await content.course(courseId);
   if (!course) return showAdminLevels(ctx);
-  const keyboard = new InlineKeyboard()
-    .text("📤 رفع ملفات لهذا المقرر", `up:c:${courseId}`)
-    .row()
-    .text("✏️ إعادة تسمية المقرر", `adm:rename:course:${courseId}`)
-    .row();
-  withNavigation(keyboard, `adm:tm:${course.term_id}`);
+  const term = await content.term(course.term_id);
+  const level = term ? await content.level(term.level_id) : undefined;
+  const archived = Boolean(
+    level?.is_archived && level.archive_year_id !== null,
+  );
+  const keyboard = new InlineKeyboard();
+  if (!archived) {
+    keyboard.text("📤 رفع ملفات لهذا المقرر", `up:c:${courseId}`).row();
+  }
+  keyboard.text("✏️ إعادة تسمية المقرر", `adm:rename:course:${courseId}`).row();
+  withNavigation(
+    keyboard,
+    archived ? `adm:atm:${course.term_id}` : `adm:tm:${course.term_id}`,
+    "adm:home",
+  );
   await show(
     ctx,
     section(course.title, "إدارة بيانات المقرر أو إضافة ملفات إلى مجلداته."),
@@ -615,7 +663,7 @@ async function showAdminFolders(ctx: Context): Promise<void> {
       .text("↓", `adm:fd:${folder.id}`)
       .row();
   }
-  withNavigation(keyboard, "adm:home");
+  withNavigation(keyboard, "adm:home", "adm:home");
   await show(
     ctx,
     section(
@@ -637,7 +685,7 @@ async function showAdminFolder(ctx: Context, folderId: number): Promise<void> {
     .row()
     .text("↑", `adm:fu:${folder.id}`)
     .text("↓", `adm:fd:${folder.id}`);
-  withNavigation(keyboard, "adm:folders");
+  withNavigation(keyboard, "adm:folders", "adm:home");
   await show(
     ctx,
     section(
@@ -655,7 +703,7 @@ async function showAdminArchives(ctx: Context): Promise<void> {
     .row();
   for (const year of years)
     keyboard.text(year.title, `adm:year:${year.id}`).row();
-  withNavigation(keyboard, "adm:home");
+  withNavigation(keyboard, "adm:home", "adm:home");
   await show(
     ctx,
     section(
@@ -669,25 +717,35 @@ async function showAdminArchives(ctx: Context): Promise<void> {
 async function showAdminArchiveYear(
   ctx: Context,
   archiveYearId: number,
+  notice?: string,
 ): Promise<void> {
   const year = await content.archiveYear(archiveYearId);
   if (!year) return showAdminArchives(ctx);
-  const levels = await content.levels(archiveYearId, false);
+  const levels = await content.archivedLevels(archiveYearId, false);
   const keyboard = new InlineKeyboard()
     .text("📦 نسخ فرقة حالية إلى هذا الأرشيف", `adm:snap:${archiveYearId}`)
     .row()
     .text("＋ إضافة فرقة أرشيفية يدويًا", `adm:addarchlevel:${archiveYearId}`)
     .row();
-  for (const level of levels)
-    keyboard.text(level.title, `adm:lv:${level.id}`).row();
-  withNavigation(keyboard, "adm:archive");
+  for (const level of levels) {
+    keyboard.text(level.title, `adm:alv:${level.id}`).row();
+    keyboard
+      .text("↩️ إعادة إلى الفرق الحالية", `adm:unarchive:${level.id}`)
+      .row();
+  }
+  withNavigation(keyboard, "adm:archive", "adm:home");
   await show(
     ctx,
     section(
       `أرشيف ${year.title}`,
-      levels.length
-        ? "اختر بنية محفوظة أو أضف نسخة جديدة."
-        : "الأرشيف فارغ حتى الآن.",
+      [
+        notice,
+        levels.length
+          ? "اختر بنية محفوظة أو أضف نسخة جديدة."
+          : "الأرشيف فارغ حتى الآن.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     ),
     keyboard,
   );
@@ -700,26 +758,27 @@ async function routeAdminCallback(
   const [, action, raw, extra] = parts;
   const id = Number(raw);
   if (action === "home") return showAdmin(ctx);
+  if (action === "student") return sendHome(ctx);
   if (action === "levels") return showAdminLevels(ctx);
   if (action === "folders") return showAdminFolders(ctx);
   if (action === "archive") return showAdminArchives(ctx);
   if (action === "upload") {
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section("رفع ملفات", "اختر الفرقة ثم الفصل والمقرر ومجلد الوجهة."),
-      levelsKeyboard(levels, "up:l", "adm:home"),
+      levelsKeyboard(levels, "up:l", "adm:home", "adm:home"),
     );
   }
   if (action === "broadcast") {
     const keyboard = new InlineKeyboard()
-      .text("📣 جميع المستخدمين", "adm:bl:all")
+      .text("جميع المستخدمين", "adm:bl:all")
       .row()
-      .text("🎓 فرقة محددة", "adm:bl:level")
+      .text("فرقة محددة", "adm:bl:level")
       .row()
-      .text("📘 فصل محدد", "adm:bl:term")
+      .text("فصل محدد", "adm:bl:term")
       .row();
-    withNavigation(keyboard, "adm:home");
+    withNavigation(keyboard, "adm:home", "adm:home");
     return show(
       ctx,
       section(
@@ -737,29 +796,33 @@ async function routeAdminCallback(
         "نص الإعلان",
         "أرسل الرسالة أو الوسائط التي تريد نسخها إلى الجمهور المحدد.",
       ),
-      navigation("adm:broadcast"),
+      adminNavigation("adm:broadcast"),
     );
   }
   if (action === "bl" && raw === "level") {
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section(
         "اختيار الفرقة",
         "سيصل الإعلان إلى المستخدمين الذين حفظوا هذه الفرقة.",
       ),
-      levelsKeyboard(levels, "adm:bllevel", "adm:broadcast"),
+      levelsKeyboard(levels, "adm:bllevel", "adm:broadcast", "adm:home"),
     );
   }
   if (action === "bl" && raw === "term") {
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section("اختيار الفرقة", "اختر الفرقة للوصول إلى فصولها."),
-      levelsKeyboard(levels, "adm:blterm", "adm:broadcast"),
+      levelsKeyboard(levels, "adm:blterm", "adm:broadcast", "adm:home"),
     );
   }
   if (action === "bllevel" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
+      return showAdmin(ctx);
+    }
     await setBroadcastState(ctx, "level", id);
     return show(
       ctx,
@@ -767,10 +830,14 @@ async function routeAdminCallback(
         "نص الإعلان",
         "أرسل الرسالة أو الوسائط لإرسالها إلى جمهور هذه الفرقة.",
       ),
-      navigation("adm:broadcast"),
+      adminNavigation("adm:broadcast"),
     );
   }
   if (action === "blterm" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
+      return showAdmin(ctx);
+    }
     const terms = await content.terms(id);
     return show(
       ctx,
@@ -778,10 +845,20 @@ async function routeAdminCallback(
         "اختيار الفصل",
         "سيصل الإعلان إلى المستخدمين الذين حفظوا هذا الفصل.",
       ),
-      termsKeyboard(terms, `adm:bltermid`, "adm:broadcast"),
+      termsKeyboard(terms, "adm:bltermid", "adm:broadcast", "adm:home"),
     );
   }
   if (action === "bltermid" && Number.isSafeInteger(id)) {
+    const term = await content.term(id);
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (
+      !term?.active ||
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null
+    ) {
+      return showAdmin(ctx);
+    }
     await setBroadcastState(ctx, "term", id);
     return show(
       ctx,
@@ -789,7 +866,7 @@ async function routeAdminCallback(
         "نص الإعلان",
         "أرسل الرسالة أو الوسائط لإرسالها إلى جمهور هذا الفصل.",
       ),
-      navigation("adm:broadcast"),
+      adminNavigation("adm:broadcast"),
     );
   }
   if (action === "addlevel") {
@@ -798,10 +875,18 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إضافة فرقة", "أرسل اسم الفرقة الجديدة."),
-      navigation("adm:levels"),
+      adminNavigation("adm:levels"),
     );
   }
   if (action === "addterm" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (
+      !level ||
+      (level.archive_year_id === null && level.is_archived) ||
+      (level.archive_year_id !== null && !level.is_archived)
+    ) {
+      return showAdminLevels(ctx);
+    }
     if (ctx.from)
       await users.setState(ctx.from.id, {
         kind: "text",
@@ -811,10 +896,14 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إضافة فصل", "أرسل اسم الفصل الدراسي."),
-      navigation(`adm:lv:${id}`),
+      adminNavigation(level.is_archived ? `adm:alv:${id}` : `adm:lv:${id}`),
     );
   }
   if (action === "addcourse" && Number.isSafeInteger(id)) {
+    const term = await content.term(id);
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (!term || !level) return showAdminLevels(ctx);
+    const archived = level.is_archived && level.archive_year_id !== null;
     if (ctx.from)
       await users.setState(ctx.from.id, {
         kind: "text",
@@ -824,7 +913,7 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إضافة مقرر", "أرسل اسم المقرر."),
-      navigation(`adm:tm:${id}`),
+      adminNavigation(`${archived ? "adm:atm" : "adm:tm"}:${id}`),
     );
   }
   if (action === "addfolder") {
@@ -836,7 +925,7 @@ async function routeAdminCallback(
         "إضافة مجلد",
         "أرسل اسم المجلد بالعربية أو الإنجليزية (مثل: مشاريع).",
       ),
-      navigation("adm:folders"),
+      adminNavigation("adm:folders"),
     );
   }
   if (
@@ -855,12 +944,20 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إعادة تسمية", "أرسل الاسم الجديد."),
-      navigation("adm:home"),
+      adminNavigation("adm:home"),
     );
   }
   if (action === "hide" && Number.isSafeInteger(id)) {
     await study.toggleLevel(id);
     return showAdminLevels(ctx);
+  }
+  if (action === "unarchive" && Number.isSafeInteger(id)) {
+    const archiveYearId = await study.unarchiveLevel(id);
+    return showAdminArchiveYear(
+      ctx,
+      archiveYearId,
+      "تمت إعادة الفرقة إلى الفرق الحالية، وتحديث الأرشيف.",
+    );
   }
   if (action === "hideterm" && Number.isSafeInteger(id)) {
     await study.toggleTerm(id);
@@ -888,11 +985,27 @@ async function routeAdminCallback(
     await study.moveFolder(id, 1);
     return showAdminFolders(ctx);
   }
-  if (action === "lv" && Number.isSafeInteger(id))
+  if (action === "lv" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level || level.is_archived || level.archive_year_id !== null) {
+      return showAdminLevels(ctx);
+    }
     return showAdminLevel(ctx, id);
+  }
+  if (action === "alv" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level?.is_archived || level.archive_year_id === null) {
+      return showAdminArchives(ctx);
+    }
+    return showAdminLevel(ctx, id);
+  }
   if (action === "tm" && Number.isSafeInteger(id))
     return showAdminTerm(ctx, id);
+  if (action === "atm" && Number.isSafeInteger(id))
+    return showAdminTerm(ctx, id);
   if (action === "cr" && Number.isSafeInteger(id))
+    return showAdminCourse(ctx, id);
+  if (action === "acr" && Number.isSafeInteger(id))
     return showAdminCourse(ctx, id);
   if (action === "noop") return;
   if (action === "addarchive") {
@@ -904,7 +1017,7 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إنشاء أرشيف", "أرسل اسم الفترة الأكاديمية، مثل 2024-2025."),
-      navigation("adm:archive"),
+      adminNavigation("adm:archive"),
     );
   }
   if (action === "year" && Number.isSafeInteger(id))
@@ -919,18 +1032,18 @@ async function routeAdminCallback(
     return show(
       ctx,
       section("إضافة فرقة للأرشيف", "أرسل اسم الفرقة المحفوظة."),
-      navigation(`adm:year:${id}`),
+      adminNavigation(`adm:year:${id}`),
     );
   }
   if (action === "snap" && Number.isSafeInteger(id)) {
-    const levels = await content.levels();
+    const levels = await content.currentLevels();
     return show(
       ctx,
       section(
         "اختيار فرقة للأرشفة",
         "سيتم نسخ الفصول والمقررات والموارد، ثم إخفاء الفرقة الحالية من القائمة النشطة.",
       ),
-      levelsKeyboard(levels, `adm:clone:${id}`, `adm:year:${id}`),
+      levelsKeyboard(levels, `adm:clone:${id}`, `adm:year:${id}`, "adm:home"),
     );
   }
   if (
@@ -950,27 +1063,53 @@ async function routeUploadCallback(
   const [, action, raw, otherRaw] = parts;
   const id = Number(raw);
   if (action === "l" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
+      return showAdmin(ctx);
+    }
     const terms = await content.terms(id);
     return show(
       ctx,
       section("رفع ملفات", "اختر الفصل الدراسي."),
-      termsKeyboard(terms, "up:t", "adm:upload"),
+      termsKeyboard(terms, "up:t", "adm:upload", "adm:home"),
     );
   }
   if (action === "t" && Number.isSafeInteger(id)) {
+    const term = await content.term(id);
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (
+      !term?.active ||
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null
+    ) {
+      return showAdmin(ctx);
+    }
     const courses = await content.courses(id);
     return show(
       ctx,
       section("رفع ملفات", "اختر المقرر."),
-      coursesKeyboard(courses, "up:c", "adm:upload"),
+      coursesKeyboard(courses, "up:c", "adm:upload", "adm:home"),
     );
   }
   if (action === "c" && Number.isSafeInteger(id)) {
+    const course = await content.course(id);
+    const term = course ? await content.term(course.term_id) : undefined;
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (
+      !course?.active ||
+      !term?.active ||
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null
+    ) {
+      return showAdmin(ctx);
+    }
     const folders = await content.folders();
     return show(
       ctx,
       section("وجهة الملفات", "اختر المجلد الذي ستُحفظ فيه الملفات."),
-      foldersKeyboard(folders, `up:f:${id}`, `adm:cr:${id}`),
+      foldersKeyboard(folders, `up:f:${id}`, `adm:cr:${id}`, "adm:home"),
     );
   }
   if (
@@ -990,7 +1129,7 @@ async function routeUploadCallback(
         "رفع الملفات",
         "أرسل ملفًا أو صورة أو فيديو. يمكنك إرسال عدة ملفات بالتتابع، ثم اكتب /done عند الانتهاء. سيُحفظ الاسم والوصف الموجودان مع الملف.",
       ),
-      navigation("adm:upload"),
+      adminNavigation("adm:upload"),
     );
   }
 }
@@ -1078,14 +1217,18 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
   if (!userId || !message) return;
   if (message.text === "/cancel") {
     await users.clearState(userId);
-    return show(ctx, section("تم إلغاء العملية"), navigation("nav:home"));
+    return show(
+      ctx,
+      section("تم إلغاء العملية"),
+      isAdmin(userId) ? adminNavigation("adm:home") : navigation("nav:home"),
+    );
   }
   if (message.text === "/done" && state.kind === "upload") {
     await users.clearState(userId);
     return show(
       ctx,
       section("اكتمل رفع الملفات", "تم حفظ جميع الملفات المرسلة."),
-      navigation("adm:home"),
+      adminNavigation("adm:home"),
     );
   }
   if (state.kind === "upload") {
@@ -1130,7 +1273,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       }
     }
     await ctx.reply("✅ تم حفظ الملف. يمكنك إرسال ملف آخر أو كتابة /done.", {
-      reply_markup: navigation("adm:home"),
+      reply_markup: adminNavigation("adm:home"),
     });
     return;
   }
@@ -1145,7 +1288,11 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     await users.clearState(userId);
     await ctx.reply(
       "وصلت رسالتك إلى فريق AGR Study. شكرًا لمساعدتنا على التطوير.",
-      { reply_markup: navigation("nav:home") },
+      {
+        reply_markup: isAdmin(userId)
+          ? adminNavigation("adm:home")
+          : navigation("nav:home"),
+      },
     );
     return;
   }
@@ -1212,19 +1359,26 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           ctx,
           section("تمت إضافة الفرقة", title),
           state.archiveYearId
-            ? navigation(`adm:year:${state.archiveYearId}`)
-            : navigation("adm:levels"),
+            ? adminNavigation(`adm:year:${state.archiveYearId}`)
+            : adminNavigation("adm:levels"),
         );
-      case "add-term":
+      case "add-term": {
         if (state.parentId === undefined)
           throw new Error("Missing level for new term.");
         await study.createTerm(state.parentId, title);
         await users.clearState(userId);
+        const level = await content.level(state.parentId);
         return show(
           ctx,
           section("تمت إضافة الفصل", title),
-          navigation(`adm:lv:${state.parentId}`),
+          adminNavigation(
+            level?.archive_year_id !== null &&
+              level?.archive_year_id !== undefined
+              ? `adm:alv:${state.parentId}`
+              : `adm:lv:${state.parentId}`,
+          ),
         );
+      }
       case "add-course":
         if (state.parentId === undefined)
           throw new Error("Missing term for new course.");
@@ -1233,7 +1387,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         return show(
           ctx,
           section("تمت إضافة المقرر", title),
-          navigation(`adm:tm:${state.parentId}`),
+          adminNavigation(`adm:tm:${state.parentId}`),
         );
       case "add-folder":
         await study.createFolder(title);
@@ -1241,7 +1395,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         return show(
           ctx,
           section("تمت إضافة المجلد", title),
-          navigation("adm:folders"),
+          adminNavigation("adm:folders"),
         );
       case "create-archive": {
         const archiveId = await study.createArchiveYear(title);
@@ -1263,7 +1417,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         return show(
           ctx,
           section("تم تحديث الاسم", title),
-          navigation("adm:home"),
+          adminNavigation("adm:home"),
         );
     }
   }
@@ -1286,7 +1440,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           await ctx.api.sendMessage(
             userId,
             `📣 اكتمل الإرسال\n━━━━━━━━━━━━━━\nالمستهدفون: ${report.attempted}\nتم التسليم: ${report.delivered}\nحسابات محظورة: ${report.blocked}\nإخفاقات أخرى: ${report.failed}`,
-            { reply_markup: navigation("adm:home") },
+            { reply_markup: adminNavigation("adm:home") },
           );
         } catch (error) {
           console.error("Broadcast job failed:", error);
@@ -1299,7 +1453,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     );
     await ctx.reply(
       "بدأ إرسال الإعلان. سأرسل تقرير التسليم إلى هنا عند الانتهاء.",
-      { reply_markup: navigation("adm:home") },
+      { reply_markup: adminNavigation("adm:home") },
     );
     return;
   }

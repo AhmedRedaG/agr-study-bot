@@ -16,14 +16,20 @@ function idOf(value: bigint | number | undefined): number {
 }
 
 export class StudyRepository {
-  async levels(
-    archiveYearId: number | null = null,
-    activeOnly = true,
-  ): Promise<Level[]> {
-    const activeClause = activeOnly ? "AND active = 1" : "";
+  async currentLevels(activeOnly = true): Promise<Level[]> {
     const result = await db.execute({
-      sql: `SELECT id, title, sort_order, active, archive_year_id FROM levels
-            WHERE archive_year_id IS ? ${activeClause} ORDER BY sort_order, id`,
+      sql: `SELECT id, title, sort_order, active, is_archived, archive_year_id FROM levels
+            WHERE archive_year_id IS NULL AND is_archived = 0
+              ${activeOnly ? "AND active = 1" : ""} ORDER BY sort_order, id`,
+    });
+    return result.rows as unknown as Level[];
+  }
+
+  async archivedLevels(archiveYearId: number, activeOnly = true): Promise<Level[]> {
+    const result = await db.execute({
+      sql: `SELECT id, title, sort_order, active, is_archived, archive_year_id FROM levels
+            WHERE archive_year_id = ? AND is_archived = 1
+              ${activeOnly ? "AND active = 1" : ""} ORDER BY sort_order, id`,
       args: [archiveYearId],
     });
     return result.rows as unknown as Level[];
@@ -46,7 +52,8 @@ export class StudyRepository {
             FROM courses c JOIN terms t ON t.id = c.term_id
             JOIN levels l ON l.id = t.level_id
             LEFT JOIN archive_years a ON a.id = l.archive_year_id
-            WHERE l.active = 1 AND t.active = 1 AND c.active = 1
+            WHERE l.archive_year_id IS NULL AND l.is_archived = 0
+              AND l.active = 1 AND t.active = 1 AND c.active = 1
               AND c.title LIKE ?
             ORDER BY l.sort_order, t.sort_order, c.sort_order LIMIT 5`,
       args: [`%${keyword}%`],
@@ -71,7 +78,7 @@ export class StudyRepository {
 
   async level(id: number): Promise<Level | undefined> {
     const result = await db.execute({
-      sql: "SELECT id, title, sort_order, active, archive_year_id FROM levels WHERE id = ?",
+      sql: "SELECT id, title, sort_order, active, is_archived, archive_year_id FROM levels WHERE id = ?",
       args: [id],
     });
     return result.rows[0] as unknown as Level | undefined;
@@ -133,9 +140,9 @@ export class StudyRepository {
     archiveYearId: number | null = null,
   ): Promise<number> {
     const result = await db.execute({
-      sql: `INSERT INTO levels (title, archive_year_id, sort_order) VALUES (?, ?, COALESCE(
+      sql: `INSERT INTO levels (title, archive_year_id, is_archived, sort_order) VALUES (?, ?, ?, COALESCE(
         (SELECT MAX(sort_order) + 1 FROM levels WHERE archive_year_id IS ?), 0))`,
-      args: [title, archiveYearId, archiveYearId],
+      args: [title, archiveYearId, archiveYearId === null ? 0 : 1, archiveYearId],
     });
     return idOf(result.lastInsertRowid);
   }
@@ -183,9 +190,33 @@ export class StudyRepository {
 
   async toggleLevel(id: number): Promise<void> {
     await db.execute({
-      sql: "UPDATE levels SET active = 1 - active WHERE id = ? AND archive_year_id IS NULL",
+      sql: "UPDATE levels SET active = 1 - active WHERE id = ? AND archive_year_id IS NULL AND is_archived = 0",
       args: [id],
     });
+  }
+
+  async unarchiveLevel(id: number): Promise<number> {
+    const tx = await db.transaction("write");
+    try {
+      const selected = await tx.execute({
+        sql: "SELECT archive_year_id FROM levels WHERE id = ? AND is_archived = 1 AND archive_year_id IS NOT NULL",
+        args: [id],
+      });
+      const archiveYearId = selected.rows[0]?.archive_year_id;
+      if (typeof archiveYearId !== "number") {
+        throw new Error("The selected level is not in an archive.");
+      }
+      await tx.execute({
+        sql: `UPDATE levels SET archive_year_id = NULL, is_archived = 0, active = 1
+              WHERE id = ? AND archive_year_id = ? AND is_archived = 1`,
+        args: [id, archiveYearId],
+      });
+      await tx.commit();
+      return archiveYearId;
+    } catch (error) {
+      await tx.rollback();
+      throw error;
+    }
   }
 
   async toggleTerm(id: number): Promise<void> {
@@ -276,7 +307,7 @@ export class StudyRepository {
       if (typeof sourceTitle !== "string")
         throw new Error("The selected level no longer exists.");
       const newLevel = await tx.execute({
-        sql: "INSERT INTO levels (title, sort_order, archive_year_id) VALUES (?, 0, ?)",
+        sql: "INSERT INTO levels (title, sort_order, active, is_archived, archive_year_id) VALUES (?, 0, 1, 1, ?)",
         args: [sourceTitle, archiveYearId],
       });
       const newLevelId = idOf(newLevel.lastInsertRowid);
@@ -319,7 +350,7 @@ export class StudyRepository {
         }
       }
       await tx.execute({
-        sql: "UPDATE levels SET active = 0 WHERE id = ? AND archive_year_id IS NULL",
+        sql: "UPDATE levels SET active = 0, is_archived = 1 WHERE id = ? AND archive_year_id IS NULL AND is_archived = 0",
         args: [levelId],
       });
       await tx.commit();
@@ -385,7 +416,7 @@ export class StudyRepository {
             JOIN levels l ON l.id = t.level_id
             JOIN folders f ON f.id = r.folder_id
             LEFT JOIN archive_years a ON a.id = l.archive_year_id
-            WHERE l.active = 1
+            WHERE l.archive_year_id IS NULL AND l.is_archived = 0 AND l.active = 1
               AND t.active = 1 AND c.active = 1
               AND (r.title LIKE ? OR r.file_name LIKE ? OR c.title LIKE ?)
             ORDER BY r.id DESC LIMIT 10`,

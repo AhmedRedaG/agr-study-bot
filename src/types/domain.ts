@@ -3,6 +3,7 @@ export interface Level {
   title: string;
   sort_order: number;
   active: number;
+  is_archived: number;
   archive_year_id: number | null;
 }
 

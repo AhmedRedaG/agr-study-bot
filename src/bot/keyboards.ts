@@ -12,12 +12,15 @@ export const labels = {
   back: "رجوع",
 };
 
+export type MainMenuCallback = "nav:home" | "adm:home";
+
 export function withNavigation(
   keyboard: InlineKeyboard,
   back?: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
   if (back) keyboard.row().text(labels.back, back);
-  keyboard.row().text(labels.main, "nav:home");
+  keyboard.row().text(labels.main, mainMenuCallback);
   return keyboard;
 }
 
@@ -25,23 +28,21 @@ export function listKeyboard<T extends { id: number; title: string }>(
   items: T[],
   callback: (item: T) => string,
   back?: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const item of items) keyboard.text(item.title, callback(item)).row();
-  return withNavigation(keyboard, back);
+  return withNavigation(keyboard, back, mainMenuCallback);
 }
 
 export function mainMenu(levels: Level[]): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const level of levels)
     keyboard.text(level.title, `nav:l:${level.id}`).row();
-  keyboard.text("🗂 السنين السابقة", "nav:archives").row();
-  keyboard
-    .text("🔎 بحث", "nav:search")
-    .text("🎓 فرقتي الحالية", "nav:my")
-    .row();
-  keyboard.text("ℹ️ نبذة عن AGR Study", "nav:about").row();
-  keyboard.text("✉️ تواصل معنا", "nav:contact").row();
+  keyboard.text("السنين السابقة", "nav:archives").row();
+  keyboard.text("بحث", "nav:search").text("فرقتي الحالية", "nav:my").row();
+  keyboard.text("نبذة عن AGR Study", "nav:about").row();
+  keyboard.text("تواصل معنا", "nav:contact").row();
   return keyboard;
 }
 
@@ -49,27 +50,41 @@ export function levelsKeyboard(
   levels: Level[],
   callbackPrefix: string,
   back?: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
-  return listKeyboard(levels, (level) => `${callbackPrefix}:${level.id}`, back);
+  return listKeyboard(
+    levels,
+    (level) => `${callbackPrefix}:${level.id}`,
+    back,
+    mainMenuCallback,
+  );
 }
 
 export function termsKeyboard(
   terms: Term[],
   callbackPrefix: string,
   back: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
-  return listKeyboard(terms, (term) => `${callbackPrefix}:${term.id}`, back);
+  return listKeyboard(
+    terms,
+    (term) => `${callbackPrefix}:${term.id}`,
+    back,
+    mainMenuCallback,
+  );
 }
 
 export function coursesKeyboard(
   courses: Course[],
   callbackPrefix: string,
   back: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
   return listKeyboard(
     courses,
     (course) => `${callbackPrefix}:${course.id}`,
     back,
+    mainMenuCallback,
   );
 }
 
@@ -77,11 +92,13 @@ export function foldersKeyboard(
   folders: Folder[],
   callbackPrefix: string,
   back: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
   return listKeyboard(
     folders,
     (folder) => `${callbackPrefix}:${folder.id}`,
     back,
+    mainMenuCallback,
   );
 }
 
@@ -89,6 +106,12 @@ export function archivesKeyboard(
   years: ArchiveYear[],
   callbackPrefix: string,
   back?: string,
+  mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
-  return listKeyboard(years, (year) => `${callbackPrefix}:${year.id}`, back);
+  return listKeyboard(
+    years,
+    (year) => `${callbackPrefix}:${year.id}`,
+    back,
+    mainMenuCallback,
+  );
 }

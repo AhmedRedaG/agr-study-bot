@@ -71,19 +71,19 @@ Check webhook health with Telegram's `getWebhookInfo` API method. To switch back
 ## Admin and content workflows
 
 - `/admin` is restricted to `ADMIN_IDS`; `/cancel` exits the current prompt.
-- Manage levels, terms, and courses with the admin menus. Rename content or hide/show active levels without deleting their associated resources.
+- Manage current (non-archived) levels, terms, and courses with the admin menus. Hidden current levels remain available to admins to restore, but archived levels and archived snapshot sources are filtered out of current-year menus.
 - Manage dynamic folders (add, rename, hide/show, and reorder). New active folders appear in every course's student menu automatically. The seed contains Lectures, Sections, Summaries, Past Exams, and Books.
-- Create an archive year such as `2024-2025`. Snapshotting a current level transactionally clones its terms, courses, and resource file references into that archive, then hides the source level from the active menu. Existing file IDs remain reusable in Telegram. Admins can also create archived levels and populate their structure directly.
+- Create an archive year such as `2024-2025`. Snapshotting a current level transactionally clones its terms, courses, and resource file references into that archive, then marks and hides the source level. Archived levels appear under that year and can be returned to current levels with **إعادة إلى الفرق الحالية**; the archive and active-level menus refresh after this action. Existing Telegram file IDs remain reusable. Admins can also create archived levels and populate their structure directly.
 - Upload by selecting a level, term, course, and folder. Send documents, photos, videos, audio, animations, or voice messages; captions are kept as the resource title/description. Send multiple messages and finish with `/done`. Telegram `file_id`, `file_unique_id`, file type, name, MIME type, caption, and uploader are stored. Optional archive-channel forwarding is best effort and reports failures in server logs; it does not undo a successful database save.
 - Broadcast text or media to all known users or users who selected a specific level/term. Delivery is paced in a Vercel background task so the webhook can acknowledge Telegram promptly; blocked users are marked, and the admin receives delivered/blocked/failed counts when the send completes. The function timeout is configured to 300 seconds, subject to the limits of your Vercel plan.
 
-Students can browse active and archived content, search current resources, set a preferred level and term, read About/Contact information, and send a message or suggestion to admins. Empty menus have an explicit next-step message rather than failing.
+Students can browse active and archived content, search current resources, set a preferred level and term, read About/Contact information, and send a message or suggestion to admins. In admin views, **القائمة الرئيسية** always returns to the admin dashboard; **واجهة الطالب / Start** is the dedicated action for opening the student menu. Empty menus have an explicit next-step message rather than failing.
 
 ## Database notes
 
 `schema.sql` is the standalone schema and default-folder seed. `npm run db:init` applies the matching idempotent schema programmatically and inserts missing defaults. The bot also creates the schema and seeds any missing default folders on startup/webhook requests, which supports clean first deployment; applying `db:init` explicitly before launch is still recommended.
 
-Archive snapshots are performed in one write transaction. Archived levels share the same levels/terms/courses/resources tables as current content, with `levels.archive_year_id` distinguishing them. User preference and broadcast audience selection are stored independently from browsing, so users can browse any level without changing their saved preference.
+Archive snapshots are performed in one write transaction. Archived levels share the same levels/terms/courses/resources tables as current content, with `levels.archive_year_id` and `levels.is_archived` distinguishing them. Startup performs an additive migration for existing databases and marks legacy archived snapshots (including their hidden source level where identifiable). Current-level queries explicitly exclude both archive membership and the archive flag. User preference and broadcast audience selection are stored independently from browsing, so users can browse any level without changing their saved preference.
 
 ## Validation
 

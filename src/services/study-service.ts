@@ -52,16 +52,24 @@ export class StudyService {
 
   async snapshotLevel(levelId: number, archiveYearId: number): Promise<number> {
     const level = await this.content.level(levelId);
-    if (!level || level.archive_year_id !== null)
+    if (!level || level.archive_year_id !== null || level.is_archived)
       throw new Error("Only an existing current level can be archived.");
     if (!(await this.content.archiveYear(archiveYearId)))
       throw new Error("The selected archive year does not exist.");
     return this.content.snapshotLevel(levelId, archiveYearId);
   }
 
+  async unarchiveLevel(id: number): Promise<number> {
+    const level = await this.content.level(id);
+    if (!level || level.archive_year_id === null || !level.is_archived) {
+      throw new Error("The selected level is not in an archive.");
+    }
+    return this.content.unarchiveLevel(id);
+  }
+
   async toggleLevel(id: number): Promise<void> {
     const level = await this.content.level(id);
-    if (!level || level.archive_year_id !== null)
+    if (!level || level.archive_year_id !== null || level.is_archived)
       throw new Error("The selected current level does not exist.");
     await this.content.toggleLevel(id);
   }
