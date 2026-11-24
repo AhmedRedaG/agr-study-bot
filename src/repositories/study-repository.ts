@@ -5,10 +5,11 @@ import type {
   Folder,
   Level,
   Resource,
+  ResourceGroup,
+  ResourceGroupSummary,
   Term,
 } from "../types/domain.js";
 
-type BindValue = string | number | bigint | null;
 function idOf(value: bigint | number | undefined): number {
   if (value === undefined)
     throw new Error("The database did not return the inserted row ID.");
@@ -116,20 +117,57 @@ export class StudyRepository {
     return result.rows as unknown as Folder[];
   }
 
-  async resources(courseId: number, folderId: number): Promise<Resource[]> {
+  async resourceGroups(
+    courseId: number,
+    folderId: number,
+    limit = 8,
+    offset = 0,
+  ): Promise<ResourceGroupSummary[]> {
     const result = await db.execute({
-      sql: `SELECT id, course_id, folder_id, file_id, file_unique_id, file_type, file_name,
-                   mime_type, title, caption
-            FROM resources WHERE course_id = ? AND folder_id = ? ORDER BY id DESC`,
+      sql: `SELECT g.id, g.course_id, g.folder_id, g.title, g.sort_order, g.created_by,
+                   COUNT(r.id) AS part_count
+            FROM resource_groups g
+            LEFT JOIN resources r ON r.group_id = g.id
+            WHERE g.course_id = ? AND g.folder_id = ?
+            GROUP BY g.id
+            ORDER BY g.sort_order, g.id LIMIT ? OFFSET ?`,
+      args: [courseId, folderId, limit, offset],
+    });
+    return result.rows as unknown as ResourceGroupSummary[];
+  }
+
+  async countResourceGroups(courseId: number, folderId: number): Promise<number> {
+    const result = await db.execute({
+      sql: "SELECT COUNT(*) AS count FROM resource_groups WHERE course_id = ? AND folder_id = ?",
       args: [courseId, folderId],
+    });
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async resourceGroup(id: number): Promise<ResourceGroup | undefined> {
+    const result = await db.execute({
+      sql: `SELECT id, course_id, folder_id, title, sort_order, created_by
+            FROM resource_groups WHERE id = ?`,
+      args: [id],
+    });
+    return result.rows[0] as unknown as ResourceGroup | undefined;
+  }
+
+  async resourcesInGroup(groupId: number): Promise<Resource[]> {
+    const result = await db.execute({
+      sql: `SELECT id, group_id, course_id, folder_id, part_order, part_label,
+                   file_id, file_unique_id, file_type, file_name, mime_type, title, caption
+            FROM resources WHERE group_id = ? ORDER BY part_order, id`,
+      args: [groupId],
     });
     return result.rows as unknown as Resource[];
   }
 
   async resource(id: number): Promise<Resource | undefined> {
     const result = await db.execute({
-      sql: `SELECT id, course_id, folder_id, file_id, file_unique_id, file_type, file_name,
-                   mime_type, title, caption FROM resources WHERE id = ?`,
+      sql: `SELECT id, group_id, course_id, folder_id, part_order, part_label,
+                   file_id, file_unique_id, file_type, file_name, mime_type, title, caption
+            FROM resources WHERE id = ?`,
       args: [id],
     });
     return result.rows[0] as unknown as Resource | undefined;
@@ -340,13 +378,43 @@ export class StudyRepository {
           });
           const oldCourseId = course.id;
           const newCourseId = idOf(newCourse.lastInsertRowid);
-          await tx.execute({
-            sql: `INSERT INTO resources
-              (course_id, folder_id, file_id, file_unique_id, file_type, file_name, mime_type, title, caption, created_by)
-              SELECT ?, folder_id, file_id, file_unique_id, file_type, file_name, mime_type, title, caption, created_by
-              FROM resources WHERE course_id = ?`,
-            args: [newCourseId, oldCourseId],
+          const groups = await tx.execute({
+            sql: `SELECT id, folder_id, title, sort_order, created_by
+                  FROM resource_groups WHERE course_id = ? ORDER BY sort_order, id`,
+            args: [oldCourseId],
           });
+          for (const group of groups.rows as unknown as Array<{
+            id: number;
+            folder_id: number;
+            title: string;
+            sort_order: number;
+            created_by: number;
+          }>) {
+            const newGroup = await tx.execute({
+              sql: `INSERT INTO resource_groups
+                      (course_id, folder_id, title, sort_order, created_by)
+                    VALUES (?, ?, ?, ?, ?)`,
+              args: [
+                newCourseId,
+                group.folder_id,
+                group.title,
+                group.sort_order,
+                group.created_by,
+              ],
+            });
+            const newGroupId = idOf(newGroup.lastInsertRowid);
+            await tx.execute({
+              sql: `INSERT INTO resources
+                      (group_id, course_id, folder_id, part_order, part_label,
+                       file_id, file_unique_id, file_type, file_name, mime_type,
+                       title, caption, created_by)
+                    SELECT ?, ?, folder_id, part_order, part_label,
+                           file_id, file_unique_id, file_type, file_name, mime_type,
+                           title, caption, created_by
+                    FROM resources WHERE group_id = ? ORDER BY part_order, id`,
+              args: [newGroupId, newCourseId, group.id],
+            });
+          }
         }
       }
       await tx.execute({
@@ -361,74 +429,212 @@ export class StudyRepository {
     }
   }
 
-  async addResource(resource: {
-    courseId: number;
-    folderId: number;
+  async createResourceGroup(
+    courseId: number,
+    folderId: number,
+    title: string,
+    createdBy: number,
+  ): Promise<number> {
+    const result = await db.execute({
+      sql: `INSERT INTO resource_groups
+              (course_id, folder_id, title, sort_order, created_by)
+            VALUES (?, ?, ?, COALESCE(
+              (SELECT MAX(sort_order) + 1 FROM resource_groups
+               WHERE course_id = ? AND folder_id = ?), 0), ?)`,
+      args: [courseId, folderId, title, courseId, folderId, createdBy],
+    });
+    return idOf(result.lastInsertRowid);
+  }
+
+  async appendResource(resource: {
+    groupId: number;
     fileId: string;
     fileUniqueId: string;
     fileType: string;
     fileName?: string;
     mimeType?: string;
-    title?: string;
+    partLabel?: string;
     caption?: string;
     createdBy: number;
-  }): Promise<void> {
-    const values: BindValue[] = [
-      resource.courseId,
-      resource.folderId,
-      resource.fileId,
-      resource.fileUniqueId,
-      resource.fileType,
-      resource.fileName ?? null,
-      resource.mimeType ?? null,
-      resource.title ?? null,
-      resource.caption ?? null,
-      resource.createdBy,
-    ];
-    await db.execute({
-      sql: `INSERT INTO resources
-        (course_id, folder_id, file_id, file_unique_id, file_type, file_name, mime_type, title, caption, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: values,
-    });
+  }): Promise<number> {
+    const tx = await db.transaction("write");
+    try {
+      const group = await tx.execute({
+        sql: "SELECT course_id, folder_id FROM resource_groups WHERE id = ?",
+        args: [resource.groupId],
+      });
+      const row = group.rows[0];
+      if (!row) throw new Error("The resource group no longer exists.");
+      const last = await tx.execute({
+        sql: "SELECT COALESCE(MAX(part_order), 0) AS last_order FROM resources WHERE group_id = ?",
+        args: [resource.groupId],
+      });
+      const partOrder = Number(last.rows[0]?.last_order ?? 0) + 1;
+      const result = await tx.execute({
+        sql: `INSERT INTO resources
+                (group_id, course_id, folder_id, part_order, part_label,
+                 file_id, file_unique_id, file_type, file_name, mime_type,
+                 title, caption, created_by)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+        args: [
+          resource.groupId,
+          Number(row.course_id),
+          Number(row.folder_id),
+          partOrder,
+          resource.partLabel ?? null,
+          resource.fileId,
+          resource.fileUniqueId,
+          resource.fileType,
+          resource.fileName ?? null,
+          resource.mimeType ?? null,
+          resource.caption ?? null,
+          resource.createdBy,
+        ],
+      });
+      await tx.commit();
+      return idOf(result.lastInsertRowid);
+    } catch (error) {
+      await tx.rollback();
+      throw error;
+    }
   }
 
-  async search(
+  async renameResourceGroup(id: number, title: string): Promise<void> {
+    const result = await db.execute({
+      sql: "UPDATE resource_groups SET title = ? WHERE id = ?",
+      args: [title, id],
+    });
+    if (Number(result.rowsAffected) === 0) {
+      throw new Error("The resource group no longer exists.");
+    }
+  }
+
+  async renameResourcePart(id: number, partLabel: string): Promise<void> {
+    const result = await db.execute({
+      sql: "UPDATE resources SET part_label = ? WHERE id = ?",
+      args: [partLabel, id],
+    });
+    if (Number(result.rowsAffected) === 0) {
+      throw new Error("The resource part no longer exists.");
+    }
+  }
+
+  async replaceResourceFile(
+    groupId: number,
+    resourceId: number,
+    file: {
+      fileId: string;
+      fileUniqueId: string;
+      fileType: string;
+      fileName?: string;
+      mimeType?: string;
+    },
+  ): Promise<void> {
+    const result = await db.execute({
+      sql: `UPDATE resources
+            SET file_id = ?, file_unique_id = ?, file_type = ?, file_name = ?, mime_type = ?
+            WHERE id = ? AND group_id = ?`,
+      args: [
+        file.fileId,
+        file.fileUniqueId,
+        file.fileType,
+        file.fileName ?? null,
+        file.mimeType ?? null,
+        resourceId,
+        groupId,
+      ],
+    });
+    if (Number(result.rowsAffected) === 0) {
+      throw new Error("The selected resource part no longer exists.");
+    }
+  }
+
+  async deleteResourceGroup(id: number): Promise<void> {
+    const tx = await db.transaction("write");
+    try {
+      const group = await tx.execute({
+        sql: "SELECT id FROM resource_groups WHERE id = ?",
+        args: [id],
+      });
+      if (!group.rows[0]) throw new Error("The resource group no longer exists.");
+      await tx.execute({ sql: "DELETE FROM resources WHERE group_id = ?", args: [id] });
+      await tx.execute({ sql: "DELETE FROM resource_groups WHERE id = ?", args: [id] });
+      await tx.commit();
+    } catch (error) {
+      await tx.rollback();
+      throw error;
+    }
+  }
+
+  async deleteResourcePart(groupId: number, resourceId: number): Promise<void> {
+    const tx = await db.transaction("write");
+    try {
+      const part = await tx.execute({
+        sql: "SELECT id FROM resources WHERE id = ? AND group_id = ?",
+        args: [resourceId, groupId],
+      });
+      if (!part.rows[0]) throw new Error("The selected resource part no longer exists.");
+      await tx.execute({
+        sql: "DELETE FROM resources WHERE id = ? AND group_id = ?",
+        args: [resourceId, groupId],
+      });
+      const remaining = await tx.execute({
+        sql: "SELECT id FROM resources WHERE group_id = ? ORDER BY part_order, id",
+        args: [groupId],
+      });
+      if (remaining.rows.length === 0) {
+        await tx.execute({ sql: "DELETE FROM resource_groups WHERE id = ?", args: [groupId] });
+      } else {
+        for (const [index, row] of remaining.rows.entries()) {
+          await tx.execute({
+            sql: "UPDATE resources SET part_order = ? WHERE id = ?",
+            args: [-(index + 1), Number(row.id)],
+          });
+        }
+        for (const [index, row] of remaining.rows.entries()) {
+          await tx.execute({
+            sql: "UPDATE resources SET part_order = ? WHERE id = ?",
+            args: [index + 1, Number(row.id)],
+          });
+        }
+      }
+      await tx.commit();
+    } catch (error) {
+      await tx.rollback();
+      throw error;
+    }
+  }
+
+  async searchResourceGroups(
     keyword: string,
   ): Promise<
     Array<
-      Resource & {
+      ResourceGroupSummary & {
         course_title: string;
-        folder_title: string;
         level_title: string;
-        term_title: string;
-        archive_title: string | null;
       }
     >
   > {
     const result = await db.execute({
-      sql: `SELECT r.id, r.course_id, r.folder_id, r.file_id, r.file_unique_id, r.file_type, r.file_name,
-                   r.mime_type, r.title, r.caption, c.title AS course_title, f.title AS folder_title,
-                   l.title AS level_title, t.title AS term_title, a.title AS archive_title
-            FROM resources r
-            JOIN courses c ON c.id = r.course_id
+      sql: `SELECT g.id, g.course_id, g.folder_id, g.title, g.sort_order, g.created_by,
+                   COUNT(DISTINCT r.id) AS part_count, c.title AS course_title,
+                   l.title AS level_title
+            FROM resource_groups g
+            JOIN resources r ON r.group_id = g.id
+            JOIN courses c ON c.id = g.course_id
             JOIN terms t ON t.id = c.term_id
             JOIN levels l ON l.id = t.level_id
-            JOIN folders f ON f.id = r.folder_id
-            LEFT JOIN archive_years a ON a.id = l.archive_year_id
             WHERE l.archive_year_id IS NULL AND l.is_archived = 0 AND l.active = 1
               AND t.active = 1 AND c.active = 1
-              AND (r.title LIKE ? OR r.file_name LIKE ? OR c.title LIKE ?)
-            ORDER BY r.id DESC LIMIT 10`,
-      args: [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`],
+              AND (g.title LIKE ? OR r.file_name LIKE ? OR r.part_label LIKE ? OR c.title LIKE ?)
+            GROUP BY g.id
+            ORDER BY g.sort_order DESC, g.id DESC LIMIT 10`,
+      args: [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`],
     });
     return result.rows as unknown as Array<
-      Resource & {
+      ResourceGroupSummary & {
         course_title: string;
-        folder_title: string;
         level_title: string;
-        term_title: string;
-        archive_title: string | null;
       }
     >;
   }

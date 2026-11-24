@@ -104,19 +104,74 @@ export class StudyService {
     await this.content.moveFolder(id, direction);
   }
 
-  async addResource(
-    resource: Parameters<StudyRepository["addResource"]>[0],
-  ): Promise<void> {
-    if (!(await this.content.course(resource.courseId)))
+  async createResourceGroup(
+    courseId: number,
+    folderId: number,
+    title: string,
+    createdBy: number,
+  ): Promise<number> {
+    this.validateTitle(title);
+    const course = await this.content.course(courseId);
+    if (!course?.active)
       throw new Error("The selected course does not exist.");
+    const term = await this.content.term(course.term_id);
+    const level = term ? await this.content.level(term.level_id) : undefined;
+    if (
+      !term?.active ||
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null
+    ) {
+      throw new Error("Resources can only be uploaded to active current courses.");
+    }
     if (
       !(await this.content.folders(false)).some(
-        (folder) => folder.id === resource.folderId,
+        (folder) => folder.id === folderId,
       )
     ) {
       throw new Error("The selected folder does not exist.");
     }
-    await this.content.addResource(resource);
+    return this.content.createResourceGroup(
+      courseId,
+      folderId,
+      title.trim(),
+      createdBy,
+    );
+  }
+
+  async appendResource(
+    resource: Parameters<StudyRepository["appendResource"]>[0],
+  ): Promise<number> {
+    if (!(await this.content.resourceGroup(resource.groupId))) {
+      throw new Error("The resource group no longer exists.");
+    }
+    return this.content.appendResource(resource);
+  }
+
+  async renameResourceGroup(id: number, title: string): Promise<void> {
+    this.validateTitle(title);
+    await this.content.renameResourceGroup(id, title.trim());
+  }
+
+  async renameResourcePart(id: number, partLabel: string): Promise<void> {
+    this.validateTitle(partLabel);
+    await this.content.renameResourcePart(id, partLabel.trim());
+  }
+
+  async replaceResourceFile(
+    groupId: number,
+    resourceId: number,
+    file: Parameters<StudyRepository["replaceResourceFile"]>[2],
+  ): Promise<void> {
+    await this.content.replaceResourceFile(groupId, resourceId, file);
+  }
+
+  async deleteResourceGroup(id: number): Promise<void> {
+    await this.content.deleteResourceGroup(id);
+  }
+
+  async deleteResourcePart(groupId: number, resourceId: number): Promise<void> {
+    await this.content.deleteResourcePart(groupId, resourceId);
   }
 
   private validateTitle(title: string): void {

@@ -6,7 +6,7 @@ import { UserRepository } from "../repositories/user-repository.js";
 import { BroadcastService } from "../services/broadcast-service.js";
 import { scheduleBackgroundTask } from "../services/background-tasks.js";
 import { StudyService } from "../services/study-service.js";
-import type { AdminState, Resource } from "../types/domain.js";
+import type { AdminState, Resource, ResourceGroup } from "../types/domain.js";
 import {
   archivesKeyboard,
   coursesKeyboard,
@@ -23,12 +23,23 @@ const content = new StudyRepository();
 const study = new StudyService(content);
 const users = new UserRepository();
 const broadcast = new BroadcastService(content, users);
+const RESOURCE_PAGE_SIZE = 8;
 
 async function show(
   ctx: Context,
   text: string,
   keyboard: InlineKeyboard,
 ): Promise<void> {
+  for (const row of keyboard.inline_keyboard) {
+    for (const button of row) {
+      if (
+        "callback_data" in button &&
+        Buffer.byteLength(button.callback_data, "utf8") > 64
+      ) {
+        throw new Error("Telegram callback_data exceeds the 64-byte limit.");
+      }
+    }
+  }
   if (ctx.callbackQuery?.message) {
     try {
       await ctx.editMessageText(text, { reply_markup: keyboard });
@@ -44,6 +55,13 @@ async function show(
 
 function section(title: string, detail?: string): string {
   return `AGR Study\n━━━━━━━━━━━━━━\n${title}${detail ? `\n\n${detail}` : ""}`;
+}
+
+function buttonLabel(label: string): string {
+  const characters = Array.from(label);
+  return characters.length <= 64
+    ? label
+    : `${characters.slice(0, 63).join("")}…`;
 }
 
 function navigation(back?: string): InlineKeyboard {
@@ -135,7 +153,11 @@ bot.command("admin", async (ctx) => {
 });
 
 bot.command("cancel", async (ctx) => {
-  if (ctx.from) await users.clearState(ctx.from.id);
+  const state = ctx.from ? await users.getState(ctx.from.id) : undefined;
+  if (state) {
+    await handleState(ctx, state);
+    return;
+  }
   const keyboard = isAdmin(ctx.from?.id)
     ? adminNavigation("adm:home")
     : navigation("nav:home");
@@ -166,9 +188,10 @@ bot.on("callback_query:data", async (ctx) => {
 
 async function routeCallback(ctx: Context, data: string): Promise<void> {
   const parts = data.split(":");
-  const [area, action, rawId, rawOther] = parts;
+  const [area, action, rawId, rawOther, rawPage] = parts;
   const id = Number(rawId);
   const other = Number(rawOther);
+  const page = rawPage === undefined ? 0 : Number(rawPage);
 
   if (data === "nav:home") return sendHome(ctx);
   if (data === "nav:archives") {
@@ -268,31 +291,74 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     area === "nav" &&
     action === "f" &&
     Number.isSafeInteger(id) &&
-    Number.isSafeInteger(other)
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    page >= 0
   ) {
-    const files = await content.resources(id, other);
-    const folder = (await content.folders(false)).find(
-      (item) => item.id === other,
+    const course = await content.course(id);
+    const term = course ? await content.term(course.term_id) : undefined;
+    const level = term ? await content.level(term.level_id) : undefined;
+    const folder = (await content.folders()).find((item) => item.id === other);
+    if (!course?.active || !term?.active || !level?.active || !folder) {
+      return sendHome(ctx);
+    }
+    const total = await content.countResourceGroups(id, other);
+    const pageCount = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE));
+    const safePage = Math.min(page, pageCount - 1);
+    const groups = await content.resourceGroups(
+      id,
+      other,
+      RESOURCE_PAGE_SIZE,
+      safePage * RESOURCE_PAGE_SIZE,
     );
+    if (total === 0) {
+      console.warn(
+        `No resource groups found for course ${id}, folder ${other}.`,
+      );
+    }
     const keyboard = new InlineKeyboard();
-    for (const file of files) {
+    for (const group of groups) {
       keyboard
         .text(
-          file.title ?? file.file_name ?? `ملف ${file.id}`,
-          `nav:r:${file.id}`,
+          buttonLabel(
+            `${group.title}${group.part_count >= 2 ? ` (${group.part_count}ج)` : ""}`,
+          ),
+          `nav:g:${group.id}:${safePage}`,
         )
         .row();
+    }
+    if (pageCount > 1) {
+      if (safePage > 0)
+        keyboard.text("‹ السابق", `nav:f:${id}:${other}:${safePage - 1}`);
+      if (safePage + 1 < pageCount)
+        keyboard.text("التالي ›", `nav:f:${id}:${other}:${safePage + 1}`);
+      keyboard.row();
     }
     withNavigation(keyboard, `nav:c:${id}`);
     return show(
       ctx,
       section(
         folder?.title ?? "المحتوى",
-        files.length
-          ? `عدد الملفات: ${files.length}`
+        total
+          ? `الموارد: ${total} · الصفحة ${safePage + 1} من ${pageCount}`
           : "لا توجد ملفات هنا بعد. ستظهر المواد الجديدة هنا عند إضافتها.",
       ),
       keyboard,
+    );
+  }
+  if (area === "nav" && action === "g" && Number.isSafeInteger(id)) {
+    const group = await content.resourceGroup(id);
+    if (!group) {
+      return show(
+        ctx,
+        section("المورد غير متاح", "قد يكون قد نُقل أو حُذف."),
+        navigation("nav:home"),
+      );
+    }
+    return sendResourceGroup(
+      ctx,
+      group,
+      Number.isSafeInteger(other) && other >= 0 ? other : 0,
     );
   }
   if (area === "nav" && action === "r" && Number.isSafeInteger(id)) {
@@ -316,7 +382,15 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
         navigation("nav:home"),
       );
     }
-    return sendResource(ctx, resource);
+    const group = await content.resourceGroup(resource.group_id);
+    if (!group) {
+      return show(
+        ctx,
+        section("الملف غير متاح", "لا توجد بيانات مجموعة لهذا المورد."),
+        navigation("nav:home"),
+      );
+    }
+    return sendResourceGroup(ctx, group);
   }
   if (data === "nav:search") {
     if (ctx.from) await users.setState(ctx.from.id, { kind: "search" });
@@ -469,14 +543,39 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
       );
     return routeUploadCallback(ctx, parts);
   }
+  if (data.startsWith("mg:")) {
+    if (!isAdmin(ctx.from?.id)) {
+      return show(
+        ctx,
+        section("غير مصرح", "هذا الإجراء مخصص للإدارة."),
+        navigation("nav:home"),
+      );
+    }
+    return routeManageCallback(ctx, parts);
+  }
 }
 
-async function sendResource(ctx: Context, resource: Resource): Promise<void> {
-  const caption =
-    [resource.title, resource.caption]
-      .filter(Boolean)
-      .join("\n\n")
-      .slice(0, 1000) || "مورد من AGR Study";
+async function sendResource(
+  ctx: Context,
+  resource: Resource,
+  groupTitle: string,
+  partIndex: number,
+  totalParts: number,
+): Promise<void> {
+  const partName =
+    totalParts > 1
+      ? (resource.part_label ?? `الجزء ${partIndex + 1} من ${totalParts}`)
+      : resource.part_label;
+  const caption = [
+    groupTitle,
+    partName,
+    resource.caption !== groupTitle && resource.caption !== partName
+      ? resource.caption
+      : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 1000);
   const options = { caption };
   switch (resource.file_type) {
     case "photo":
@@ -501,11 +600,48 @@ async function sendResource(ctx: Context, resource: Resource): Promise<void> {
       });
       break;
   }
-  await ctx.reply("يمكنك متابعة التصفح من هنا:", {
-    reply_markup: navigation(
-      `nav:f:${resource.course_id}:${resource.folder_id}`,
-    ),
-  });
+}
+
+async function sendResourceGroup(
+  ctx: Context,
+  group: ResourceGroup,
+  page = 0,
+): Promise<void> {
+  const course = await content.course(group.course_id);
+  const term = course ? await content.term(course.term_id) : undefined;
+  const level = term ? await content.level(term.level_id) : undefined;
+  const folder = (await content.folders()).find(
+    (item) => item.id === group.folder_id,
+  );
+  if (!course?.active || !term?.active || !level?.active || !folder) {
+    return show(
+      ctx,
+      section("المحتوى غير متاح", "لم يعد هذا المورد منشورًا للطلاب."),
+      navigation("nav:home"),
+    );
+  }
+  const parts = await content.resourcesInGroup(group.id);
+  if (parts.length === 0) {
+    console.warn(`Resource group ${group.id} has no file parts.`);
+    return show(
+      ctx,
+      section("لا توجد ملفات", "لم تُرفق ملفات بهذا العنوان بعد."),
+      navigation(`nav:f:${group.course_id}:${group.folder_id}:${page}`),
+    );
+  }
+  for (const [index, resource] of parts.entries()) {
+    await sendResource(ctx, resource, group.title, index, parts.length);
+  }
+  await ctx.reply(
+    parts.length > 1
+      ? `تم إرسال ${parts.length} أجزاء من «${group.title}».`
+      : "يمكنك متابعة التصفح من هنا:",
+    {
+      reply_markup: navigation(
+        `nav:f:${group.course_id}:${group.folder_id}:${page}`,
+      ),
+    },
+  );
 }
 
 async function showAdmin(ctx: Context): Promise<void> {
@@ -517,6 +653,8 @@ async function showAdmin(ctx: Context): Promise<void> {
     .text("🕰 إدارة أرشيف السنوات", "adm:archive")
     .row()
     .text("📤 رفع ملفات", "adm:upload")
+    .row()
+    .text("🗃 إدارة الملفات", "adm:resources")
     .row()
     .text("📣 إرسال إعلان", "adm:broadcast")
     .row()
@@ -530,6 +668,473 @@ async function showAdmin(ctx: Context): Promise<void> {
       "تحكم في المحتوى والهيكل الأكاديمي والإعلانات من داخل Telegram.",
     ),
     keyboard,
+  );
+}
+
+async function showAdminResourceLevels(ctx: Context): Promise<void> {
+  const levels = await content.currentLevels();
+  return show(
+    ctx,
+    section("إدارة الملفات", "اختر الفرقة ثم الفصل والمقرر ومجلد المحتوى."),
+    levelsKeyboard(levels, "mg:l", "adm:home", "adm:home"),
+  );
+}
+
+async function showAdminResourceGroups(
+  ctx: Context,
+  courseId: number,
+  folderId: number,
+  page = 0,
+): Promise<void> {
+  const total = await content.countResourceGroups(courseId, folderId);
+  const pageCount = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE));
+  const safePage = Math.min(Math.max(0, page), pageCount - 1);
+  const groups = await content.resourceGroups(
+    courseId,
+    folderId,
+    RESOURCE_PAGE_SIZE,
+    safePage * RESOURCE_PAGE_SIZE,
+  );
+  if (total === 0) {
+    console.warn(
+      `No resource groups to manage for course ${courseId}, folder ${folderId}.`,
+    );
+  }
+  const keyboard = new InlineKeyboard();
+  for (const group of groups) {
+    keyboard
+      .text(
+        buttonLabel(
+          `${group.title}${group.part_count >= 2 ? ` (${group.part_count}ج)` : ""}`,
+        ),
+        `mg:g:${group.id}:${safePage}:0`,
+      )
+      .row();
+  }
+  if (pageCount > 1) {
+    if (safePage > 0) {
+      keyboard.text("‹ السابق", `mg:f:${courseId}:${folderId}:${safePage - 1}`);
+    }
+    if (safePage + 1 < pageCount) {
+      keyboard.text("التالي ›", `mg:f:${courseId}:${folderId}:${safePage + 1}`);
+    }
+    keyboard.row();
+  }
+  withNavigation(keyboard, `mg:c:${courseId}`, "adm:home");
+  await show(
+    ctx,
+    section(
+      "إدارة الملفات",
+      total
+        ? `الموارد: ${total} · الصفحة ${safePage + 1} من ${pageCount}`
+        : "لا توجد موارد في هذا المجلد بعد. استخدم «رفع ملفات» لإضافة موارد.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminResourceGroup(
+  ctx: Context,
+  groupId: number,
+  groupPage = 0,
+  partPage = 0,
+  notice?: string,
+): Promise<void> {
+  const group = await content.resourceGroup(groupId);
+  if (!group) return showAdminResourceLevels(ctx);
+  if (
+    !(await isCurrentCourse(group.course_id)) ||
+    !(await content.folders()).some((folder) => folder.id === group.folder_id)
+  ) {
+    return showAdminResourceLevels(ctx);
+  }
+  const parts = await content.resourcesInGroup(groupId);
+  const pageCount = Math.max(1, Math.ceil(parts.length / RESOURCE_PAGE_SIZE));
+  const safePartPage = Math.min(Math.max(0, partPage), pageCount - 1);
+  const visibleParts = parts.slice(
+    safePartPage * RESOURCE_PAGE_SIZE,
+    (safePartPage + 1) * RESOURCE_PAGE_SIZE,
+  );
+  const keyboard = new InlineKeyboard()
+    .text("✏️ تعديل العنوان", `mg:rn:${group.id}:${groupPage}:${safePartPage}`)
+    .text("＋ إضافة جزء", `mg:add:${group.id}:${groupPage}:${safePartPage}`)
+    .row()
+    .text("🗑 حذف المورد", `mg:del:${group.id}:${groupPage}:${safePartPage}`)
+    .row();
+  for (const [index, part] of visibleParts.entries()) {
+    const position = safePartPage * RESOURCE_PAGE_SIZE + index + 1;
+    const title = part.part_label ?? part.file_name ?? `الجزء ${position}`;
+    keyboard
+      .text(buttonLabel(`${position}. ${title}`), "mg:noop")
+      .row()
+      .text(
+        "استبدال الملف",
+        `mg:replace:${group.id}:${part.id}:${groupPage}:${safePartPage}`,
+      )
+      .text(
+        "تسمية الجزء",
+        `mg:rpname:${group.id}:${part.id}:${groupPage}:${safePartPage}`,
+      )
+      .text(
+        "حذف الجزء",
+        `mg:delpart:${group.id}:${part.id}:${groupPage}:${safePartPage}`,
+      )
+      .row();
+  }
+  if (pageCount > 1) {
+    if (safePartPage > 0) {
+      keyboard.text(
+        "‹ الأجزاء السابقة",
+        `mg:g:${group.id}:${groupPage}:${safePartPage - 1}`,
+      );
+    }
+    if (safePartPage + 1 < pageCount) {
+      keyboard.text(
+        "الأجزاء التالية ›",
+        `mg:g:${group.id}:${groupPage}:${safePartPage + 1}`,
+      );
+    }
+    keyboard.row();
+  }
+  withNavigation(
+    keyboard,
+    `mg:f:${group.course_id}:${group.folder_id}:${groupPage}`,
+    "adm:home",
+  );
+  await show(
+    ctx,
+    section(
+      group.title,
+      [
+        notice,
+        parts.length
+          ? `عدد الأجزاء: ${parts.length}`
+          : "لم تُرفع ملفات لهذا العنوان بعد.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    ),
+    keyboard,
+  );
+}
+
+async function isCurrentCourse(courseId: number): Promise<boolean> {
+  const course = await content.course(courseId);
+  const term = course ? await content.term(course.term_id) : undefined;
+  const level = term ? await content.level(term.level_id) : undefined;
+  return Boolean(
+    course?.active &&
+    term?.active &&
+    level?.active &&
+    !level.is_archived &&
+    level.archive_year_id === null,
+  );
+}
+
+async function routeManageCallback(
+  ctx: Context,
+  parts: string[],
+): Promise<void> {
+  const [, action, raw, otherRaw, pageRaw, extraRaw] = parts;
+  const id = Number(raw);
+  const other = Number(otherRaw);
+  const page = pageRaw === undefined ? 0 : Number(pageRaw);
+  const extra = extraRaw === undefined ? 0 : Number(extraRaw);
+
+  if (action === "home") {
+    if (ctx.from) await users.clearState(ctx.from.id);
+    return showAdmin(ctx);
+  }
+  if (action === "noop") return;
+  if (
+    [
+      "g",
+      "rn",
+      "rpname",
+      "add",
+      "replace",
+      "del",
+      "confirmdel",
+      "delpart",
+      "confirmdelpart",
+    ].includes(action ?? "") &&
+    Number.isSafeInteger(id)
+  ) {
+    const group = await content.resourceGroup(id);
+    if (
+      !group ||
+      !(await isCurrentCourse(group.course_id)) ||
+      !(await content.folders()).some((folder) => folder.id === group.folder_id)
+    ) {
+      return showAdminResourceLevels(ctx);
+    }
+  }
+  if (action === "l" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
+      return showAdminResourceLevels(ctx);
+    }
+    return show(
+      ctx,
+      section(`إدارة ملفات ${level.title}`, "اختر الفصل الدراسي."),
+      termsKeyboard(await content.terms(id), "mg:t", "adm:home", "adm:home"),
+    );
+  }
+  if (action === "t" && Number.isSafeInteger(id)) {
+    const term = await content.term(id);
+    if (!term?.active || !(await isCurrentCourseParentLevel(term.level_id))) {
+      return showAdminResourceLevels(ctx);
+    }
+    return show(
+      ctx,
+      section(`إدارة ملفات ${term.title}`, "اختر المقرر."),
+      coursesKeyboard(
+        await content.courses(id),
+        "mg:c",
+        `mg:l:${term.level_id}`,
+        "adm:home",
+      ),
+    );
+  }
+  if (action === "c" && Number.isSafeInteger(id)) {
+    if (!(await isCurrentCourse(id))) return showAdminResourceLevels(ctx);
+    const course = await content.course(id);
+    if (!course) return showAdminResourceLevels(ctx);
+    const folders = await content.folders();
+    return show(
+      ctx,
+      section(course.title, "اختر مجلد المحتوى لإدارة موارده."),
+      foldersKeyboard(
+        folders,
+        `mg:f:${id}`,
+        `mg:t:${course.term_id}`,
+        "adm:home",
+      ),
+    );
+  }
+  if (
+    action === "f" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    page >= 0
+  ) {
+    if (!(await isCurrentCourse(id))) return showAdminResourceLevels(ctx);
+    const folder = (await content.folders()).find((item) => item.id === other);
+    if (!folder) return showAdminResourceLevels(ctx);
+    return showAdminResourceGroups(ctx, id, other, page);
+  }
+  if (
+    action === "g" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    page >= 0
+  ) {
+    const group = await content.resourceGroup(id);
+    if (!group || !(await isCurrentCourse(group.course_id))) {
+      return showAdminResourceLevels(ctx);
+    }
+    return showAdminResourceGroup(ctx, id, other, page);
+  }
+  if (
+    action === "rn" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page)
+  ) {
+    if (!ctx.from) return;
+    await users.setState(ctx.from.id, {
+      kind: "text",
+      action: "rename-resource-group",
+      entityId: id,
+      resourcePage: other,
+      partPage: page,
+    });
+    return show(
+      ctx,
+      section("تعديل عنوان المورد", "أرسل العنوان الجديد."),
+      adminNavigation(`mg:g:${id}:${other}:${page}`),
+    );
+  }
+  if (
+    action === "rpname" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    Number.isSafeInteger(extra)
+  ) {
+    const group = await content.resourceGroup(id);
+    const part = await content.resource(other);
+    if (!group || part?.group_id !== group.id) {
+      return showAdminResourceLevels(ctx);
+    }
+    if (!ctx.from) return;
+    await users.setState(ctx.from.id, {
+      kind: "text",
+      action: "rename-resource-part",
+      entityId: other,
+      parentId: id,
+      resourcePage: page,
+      partPage: extra,
+    });
+    return show(
+      ctx,
+      section("تسمية الجزء", "أرسل الاسم الجديد للجزء."),
+      adminNavigation(`mg:g:${id}:${page}:${extra}`),
+    );
+  }
+  if (
+    action === "add" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page)
+  ) {
+    const group = await content.resourceGroup(id);
+    if (!group || !(await isCurrentCourse(group.course_id))) {
+      return showAdminResourceLevels(ctx);
+    }
+    if (!ctx.from) return;
+    await users.setState(ctx.from.id, {
+      kind: "upload",
+      courseId: group.course_id,
+      folderId: group.folder_id,
+      groupId: id,
+      mode: "multipart",
+      uploadedCount: 0,
+      returnToManage: true,
+      returnPage: other,
+      returnPartPage: page,
+    });
+    return show(
+      ctx,
+      section(
+        "إضافة أجزاء",
+        `أرسل ملفات إضافية إلى «${group.title}»، ثم اكتب /done.`,
+      ),
+      adminNavigation(`mg:g:${id}:${other}:${page}`),
+    );
+  }
+  if (
+    action === "replace" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    Number.isSafeInteger(extra)
+  ) {
+    const group = await content.resourceGroup(id);
+    const part = await content.resource(other);
+    if (!group || part?.group_id !== id) {
+      return showAdminResourceLevels(ctx);
+    }
+    if (!ctx.from) return;
+    await users.setState(ctx.from.id, {
+      kind: "replace-resource",
+      groupId: id,
+      resourceId: other,
+      page,
+      partPage: extra,
+    });
+    return show(
+      ctx,
+      section(
+        "استبدال الملف",
+        "أرسل الملف الجديد. سيبقى عنوان المورد وترتيب الجزء كما هما.",
+      ),
+      adminNavigation(`mg:g:${id}:${page}:${extra}`),
+    );
+  }
+  if (
+    action === "del" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page)
+  ) {
+    const group = await content.resourceGroup(id);
+    if (!group) return showAdminResourceLevels(ctx);
+    const keyboard = new InlineKeyboard()
+      .text("نعم، احذف المورد", `mg:confirmdel:${id}:${other}:${page}`)
+      .row()
+      .text("إلغاء", `mg:g:${id}:${other}:${page}`);
+    withNavigation(
+      keyboard,
+      `mg:f:${group.course_id}:${group.folder_id}:${other}`,
+      "adm:home",
+    );
+    return show(
+      ctx,
+      section("تأكيد الحذف", `سيُحذف «${group.title}» وجميع ملفاته نهائيًا.`),
+      keyboard,
+    );
+  }
+  if (
+    action === "confirmdel" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page)
+  ) {
+    const group = await content.resourceGroup(id);
+    if (!group) return showAdminResourceLevels(ctx);
+    await study.deleteResourceGroup(id);
+    return showAdminResourceGroups(
+      ctx,
+      group.course_id,
+      group.folder_id,
+      other,
+    );
+  }
+  if (
+    action === "delpart" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    Number.isSafeInteger(extra)
+  ) {
+    const part = await content.resource(other);
+    if (part?.group_id !== id)
+      return showAdminResourceGroup(ctx, id, page, extra);
+    const keyboard = new InlineKeyboard()
+      .text(
+        "نعم، احذف الجزء",
+        `mg:confirmdelpart:${id}:${other}:${page}:${extra}`,
+      )
+      .row()
+      .text("إلغاء", `mg:g:${id}:${page}:${extra}`);
+    return show(
+      ctx,
+      section(
+        "تأكيد حذف الجزء",
+        "سيُحذف هذا الملف فقط، مع الحفاظ على ترتيب بقية الأجزاء.",
+      ),
+      keyboard,
+    );
+  }
+  if (
+    action === "confirmdelpart" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other) &&
+    Number.isSafeInteger(page) &&
+    Number.isSafeInteger(extra)
+  ) {
+    const group = await content.resourceGroup(id);
+    if (!group) return showAdminResourceLevels(ctx);
+    await study.deleteResourcePart(id, other);
+    if (!(await content.resourceGroup(id))) {
+      return showAdminResourceGroups(
+        ctx,
+        group.course_id,
+        group.folder_id,
+        page,
+      );
+    }
+    return showAdminResourceGroup(ctx, id, page, extra);
+  }
+}
+
+async function isCurrentCourseParentLevel(levelId: number): Promise<boolean> {
+  const level = await content.level(levelId);
+  return Boolean(
+    level?.active && !level.is_archived && level.archive_year_id === null,
   );
 }
 
@@ -757,9 +1362,13 @@ async function routeAdminCallback(
 ): Promise<void> {
   const [, action, raw, extra] = parts;
   const id = Number(raw);
-  if (action === "home") return showAdmin(ctx);
+  if (action === "home") {
+    if (ctx.from) await users.clearState(ctx.from.id);
+    return showAdmin(ctx);
+  }
   if (action === "student") return sendHome(ctx);
   if (action === "levels") return showAdminLevels(ctx);
+  if (action === "resources") return showAdminResourceLevels(ctx);
   if (action === "folders") return showAdminFolders(ctx);
   if (action === "archive") return showAdminArchives(ctx);
   if (action === "upload") {
@@ -1117,19 +1726,53 @@ async function routeUploadCallback(
     Number.isSafeInteger(id) &&
     Number.isSafeInteger(Number(otherRaw))
   ) {
-    if (ctx.from)
-      await users.setState(ctx.from.id, {
-        kind: "upload",
-        courseId: Number(otherRaw),
-        folderId: id,
-      });
+    const courseId = id;
+    const folderId = Number(otherRaw);
+    if (!(await isCurrentCourse(courseId))) return showAdmin(ctx);
+    if (!(await content.folders()).some((folder) => folder.id === folderId)) {
+      return showAdmin(ctx);
+    }
+    const keyboard = new InlineKeyboard()
+      .text("📄 ملف واحد", `up:single:${courseId}:${folderId}`)
+      .row()
+      .text("📚 مورد متعدد الأجزاء", `up:multi:${courseId}:${folderId}`)
+      .row();
+    withNavigation(keyboard, `up:c:${courseId}`, "adm:home");
     return show(
       ctx,
       section(
-        "رفع الملفات",
-        "أرسل ملفًا أو صورة أو فيديو. يمكنك إرسال عدة ملفات بالتتابع، ثم اكتب /done عند الانتهاء. سيُحفظ الاسم والوصف الموجودان مع الملف.",
+        "طريقة الرفع",
+        "اختر ملفًا واحدًا أو اجمع عدة ملفات تحت عنوان واحد.",
       ),
-      adminNavigation("adm:upload"),
+      keyboard,
+    );
+  }
+  if (
+    (action === "single" || action === "multi") &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(otherRaw))
+  ) {
+    const folderId = Number(otherRaw);
+    if (!(await isCurrentCourse(id))) return showAdmin(ctx);
+    const folder = (await content.folders()).find(
+      (item) => item.id === folderId,
+    );
+    if (!folder) return showAdmin(ctx);
+    if (ctx.from) {
+      await users.setState(ctx.from.id, {
+        kind: "upload-title",
+        courseId: id,
+        folderId,
+        mode: action === "single" ? "single" : "multipart",
+      });
+    }
+    return show(
+      ctx,
+      section(
+        action === "single" ? "عنوان الملف" : "عنوان المورد متعدد الأجزاء",
+        "أرسل العنوان الرئيسي الذي سيظهر للطلاب.",
+      ),
+      adminNavigation(`up:f:${id}:${folderId}`),
     );
   }
 }
@@ -1216,7 +1859,33 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
   const message = ctx.message;
   if (!userId || !message) return;
   if (message.text === "/cancel") {
+    if (
+      state.kind === "upload" &&
+      state.groupId &&
+      !state.returnToManage &&
+      (state.uploadedCount ?? 0) === 0
+    ) {
+      await study.deleteResourceGroup(state.groupId);
+    }
     await users.clearState(userId);
+    if (state.kind === "replace-resource") {
+      return showAdminResourceGroup(
+        ctx,
+        state.groupId,
+        state.page,
+        state.partPage,
+        "تم إلغاء استبدال الملف.",
+      );
+    }
+    if (state.kind === "upload" && state.returnToManage && state.groupId) {
+      return showAdminResourceGroup(
+        ctx,
+        state.groupId,
+        state.returnPage,
+        state.returnPartPage,
+        "تم إلغاء إضافة الأجزاء.",
+      );
+    }
     return show(
       ctx,
       section("تم إلغاء العملية"),
@@ -1224,10 +1893,89 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     );
   }
   if (message.text === "/done" && state.kind === "upload") {
+    if (
+      state.groupId &&
+      !state.returnToManage &&
+      (state.uploadedCount ?? 0) === 0
+    ) {
+      await study.deleteResourceGroup(state.groupId);
+    }
     await users.clearState(userId);
+    if (state.returnToManage && state.groupId) {
+      return showAdminResourceGroup(
+        ctx,
+        state.groupId,
+        state.returnPage,
+        state.returnPartPage,
+        `تم حفظ ${state.uploadedCount ?? 0} أجزاء جديدة.`,
+      );
+    }
     return show(
       ctx,
-      section("اكتمل رفع الملفات", "تم حفظ جميع الملفات المرسلة."),
+      section("اكتمل رفع الملفات", `تم حفظ ${state.uploadedCount ?? 0} ملفًا.`),
+      adminNavigation("adm:home"),
+    );
+  }
+  if (state.kind === "replace-resource") {
+    if (!isAdmin(userId)) {
+      await users.clearState(userId);
+      await ctx.reply("انتهت صلاحية هذه العملية.");
+      return;
+    }
+    const file = incomingFile(ctx);
+    if (!file) {
+      await ctx.reply(
+        "أرسل المستند أو الصورة أو الفيديو الجديد، أو استخدم /cancel.",
+      );
+      return;
+    }
+    await study.replaceResourceFile(state.groupId, state.resourceId, {
+      fileId: file.id,
+      fileUniqueId: file.uniqueId,
+      fileType: file.type,
+      ...(file.fileName ? { fileName: file.fileName } : {}),
+      ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+    });
+    await users.clearState(userId);
+    return showAdminResourceGroup(
+      ctx,
+      state.groupId,
+      state.page,
+      state.partPage,
+      "تم استبدال الملف مع الحفاظ على عنوانه وترتيبه.",
+    );
+  }
+  if (state.kind === "upload-title") {
+    if (!isAdmin(userId)) {
+      await users.clearState(userId);
+      await ctx.reply("انتهت صلاحية هذه العملية.");
+      return;
+    }
+    const title = message.text?.trim();
+    if (!title || title.startsWith("/") || title.length > 100) {
+      await ctx.reply("أرسل عنوانًا من 1 إلى 100 حرف، أو استخدم /cancel.");
+      return;
+    }
+    await users.setState(
+      userId,
+      {
+        kind: "upload",
+        courseId: state.courseId,
+        folderId: state.folderId,
+        groupTitle: title,
+        mode: state.mode,
+        uploadedCount: 0,
+      },
+      60 * 60 * 1000,
+    );
+    return show(
+      ctx,
+      section(
+        state.mode === "single" ? "رفع ملف واحد" : "رفع أجزاء المورد",
+        state.mode === "single"
+          ? `أرسل ملف «${title}» الآن.`
+          : `أرسل ملفات «${title}» بالترتيب، ثم اكتب /done.`,
+      ),
       adminNavigation("adm:home"),
     );
   }
@@ -1244,16 +1992,23 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       );
       return;
     }
-    const title = message.caption?.trim();
-    await study.addResource({
-      courseId: state.courseId,
-      folderId: state.folderId,
+    const partLabel = message.caption?.trim();
+    const groupId =
+      state.groupId ??
+      (await study.createResourceGroup(
+        state.courseId,
+        state.folderId,
+        state.groupTitle ?? file.fileName ?? "مورد جديد",
+        userId,
+      ));
+    await study.appendResource({
+      groupId,
       fileId: file.id,
       fileUniqueId: file.uniqueId,
       fileType: file.type,
       ...(file.fileName ? { fileName: file.fileName } : {}),
       ...(file.mimeType ? { mimeType: file.mimeType } : {}),
-      ...(title ? { title } : {}),
+      ...(partLabel ? { partLabel } : {}),
       ...(message.caption ? { caption: message.caption } : {}),
       createdBy: userId,
     });
@@ -1261,7 +2016,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       try {
         await ctx.api.sendMessage(
           env.archiveChannelId,
-          `AGR Study resource\nCourse ID: ${state.courseId}\nFolder ID: ${state.folderId}\nTitle: ${title ?? file.fileName ?? "untitled"}\nfile_id: ${file.id}\nfile_unique_id: ${file.uniqueId}`,
+          `AGR Study resource\nCourse ID: ${state.courseId}\nFolder ID: ${state.folderId}\nGroup ID: ${groupId}\nPart: ${(state.uploadedCount ?? 0) + 1}\nfile_id: ${file.id}\nfile_unique_id: ${file.uniqueId}`,
         );
         await ctx.api.copyMessage(
           env.archiveChannelId,
@@ -1272,9 +2027,32 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         console.error("Archive channel backup failed:", error);
       }
     }
-    await ctx.reply("✅ تم حفظ الملف. يمكنك إرسال ملف آخر أو كتابة /done.", {
-      reply_markup: adminNavigation("adm:home"),
-    });
+    const uploadedCount = (state.uploadedCount ?? 0) + 1;
+    if (state.mode === "single") {
+      await users.clearState(userId);
+      return showAdminResourceGroup(
+        ctx,
+        groupId,
+        state.returnPage ?? 0,
+        0,
+        "تم حفظ الملف.",
+      );
+    }
+    await users.setState(
+      userId,
+      { ...state, groupId, uploadedCount },
+      60 * 60 * 1000,
+    );
+    await ctx.reply(
+      `✅ تم حفظ الجزء ${uploadedCount}. يمكنك إرسال جزء آخر أو كتابة /done.`,
+      {
+        reply_markup: adminNavigation(
+          state.returnToManage
+            ? `mg:g:${groupId}:${state.returnPage ?? 0}:${state.returnPartPage ?? 0}`
+            : "adm:home",
+        ),
+      },
+    );
     return;
   }
   if (state.kind === "feedback") {
@@ -1301,7 +2079,9 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       await ctx.reply("أرسل كلمة نصية للبحث.");
       return;
     }
-    const results = await content.search(message.text.trim().slice(0, 100));
+    const results = await content.searchResourceGroups(
+      message.text.trim().slice(0, 100),
+    );
     const courses = await content.searchCourses(
       message.text.trim().slice(0, 100),
     );
@@ -1316,11 +2096,8 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         .row();
     }
     for (const item of results) {
-      const name = item.title ?? item.file_name ?? item.course_title;
-      const archive = item.archive_title ? ` · ${item.archive_title}` : "";
-      keyboard
-        .text(`${name} · ${item.course_title}${archive}`, `nav:r:${item.id}`)
-        .row();
+      const name = `${item.title}${item.part_count >= 2 ? ` (${item.part_count}ج)` : ""}`;
+      keyboard.text(`${name} · ${item.course_title}`, `nav:g:${item.id}`).row();
     }
     withNavigation(keyboard, "nav:home");
     await users.clearState(userId);
@@ -1397,6 +2174,30 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           section("تمت إضافة المجلد", title),
           adminNavigation("adm:folders"),
         );
+      case "rename-resource-group":
+        if (state.entityId === undefined)
+          throw new Error("Missing resource group for rename.");
+        await study.renameResourceGroup(state.entityId, title);
+        await users.clearState(userId);
+        return showAdminResourceGroup(
+          ctx,
+          state.entityId,
+          state.resourcePage,
+          state.partPage,
+          "تم تحديث عنوان المورد.",
+        );
+      case "rename-resource-part":
+        if (state.entityId === undefined || state.parentId === undefined)
+          throw new Error("Missing resource part for rename.");
+        await study.renameResourcePart(state.entityId, title);
+        await users.clearState(userId);
+        return showAdminResourceGroup(
+          ctx,
+          state.parentId,
+          state.resourcePage,
+          state.partPage,
+          "تم تحديث اسم الجزء.",
+        );
       case "create-archive": {
         const archiveId = await study.createArchiveYear(title);
         await users.clearState(userId);
@@ -1462,9 +2263,12 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
 bot.on("message", async (ctx) => {
   const text = ctx.message.text;
   if (text?.startsWith("/")) {
-    if (text === "/done" && isAdmin(ctx.from?.id)) {
+    if (text === "/cancel" || (text === "/done" && isAdmin(ctx.from?.id))) {
       const state = ctx.from ? await users.getState(ctx.from.id) : undefined;
-      if (state?.kind === "upload") {
+      if (
+        state &&
+        (text === "/cancel" || (state.kind === "upload" && text === "/done"))
+      ) {
         await handleState(ctx, state);
         return;
       }

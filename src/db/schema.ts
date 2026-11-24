@@ -47,10 +47,22 @@ CREATE TABLE IF NOT EXISTS folders (
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1
 );
-CREATE TABLE IF NOT EXISTS resources (
+CREATE TABLE IF NOT EXISTS resource_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
   folder_id INTEGER NOT NULL REFERENCES folders(id),
+  title TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS resources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER REFERENCES resource_groups(id) ON DELETE CASCADE,
+  course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+  folder_id INTEGER NOT NULL REFERENCES folders(id),
+  part_order INTEGER NOT NULL DEFAULT 1,
+  part_label TEXT,
   file_id TEXT NOT NULL,
   file_unique_id TEXT NOT NULL,
   file_type TEXT NOT NULL,
@@ -77,6 +89,8 @@ CREATE INDEX IF NOT EXISTS idx_courses_term ON courses(term_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_resources_course_folder ON resources(course_id, folder_id);
 CREATE INDEX IF NOT EXISTS idx_resources_search ON resources(title, file_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON user_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_resource_groups_course_folder ON resource_groups(course_id, folder_id, sort_order, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resources_group_part ON resources(group_id, part_order);
 `;
 
 let initialized: Promise<void> | undefined;
