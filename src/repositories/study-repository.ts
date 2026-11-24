@@ -1,14 +1,25 @@
 import { db } from "../db/client.js";
-import type { ArchiveYear, Course, Folder, Level, Resource, Term } from "../types/domain.js";
+import type {
+  ArchiveYear,
+  Course,
+  Folder,
+  Level,
+  Resource,
+  Term,
+} from "../types/domain.js";
 
 type BindValue = string | number | bigint | null;
 function idOf(value: bigint | number | undefined): number {
-  if (value === undefined) throw new Error("The database did not return the inserted row ID.");
+  if (value === undefined)
+    throw new Error("The database did not return the inserted row ID.");
   return Number(value);
 }
 
 export class StudyRepository {
-  async levels(archiveYearId: number | null = null, activeOnly = true): Promise<Level[]> {
+  async levels(
+    archiveYearId: number | null = null,
+    activeOnly = true,
+  ): Promise<Level[]> {
     const activeClause = activeOnly ? "AND active = 1" : "";
     const result = await db.execute({
       sql: `SELECT id, title, sort_order, active, archive_year_id FROM levels
@@ -18,7 +29,17 @@ export class StudyRepository {
     return result.rows as unknown as Level[];
   }
 
-  async searchCourses(keyword: string): Promise<Array<Course & { level_title: string; term_title: string; archive_title: string | null }>> {
+  async searchCourses(
+    keyword: string,
+  ): Promise<
+    Array<
+      Course & {
+        level_title: string;
+        term_title: string;
+        archive_title: string | null;
+      }
+    >
+  > {
     const result = await db.execute({
       sql: `SELECT c.id, c.term_id, c.title, c.sort_order, c.active, l.title AS level_title,
                    t.title AS term_title, a.title AS archive_title
@@ -30,7 +51,13 @@ export class StudyRepository {
             ORDER BY l.sort_order, t.sort_order, c.sort_order LIMIT 5`,
       args: [`%${keyword}%`],
     });
-    return result.rows as unknown as Array<Course & { level_title: string; term_title: string; archive_title: string | null }>;
+    return result.rows as unknown as Array<
+      Course & {
+        level_title: string;
+        term_title: string;
+        archive_title: string | null;
+      }
+    >;
   }
 
   async terms(levelId: number, activeOnly = true): Promise<Term[]> {
@@ -51,7 +78,10 @@ export class StudyRepository {
   }
 
   async term(id: number): Promise<Term | undefined> {
-    const result = await db.execute({ sql: "SELECT id, level_id, title, sort_order, active FROM terms WHERE id = ?", args: [id] });
+    const result = await db.execute({
+      sql: "SELECT id, level_id, title, sort_order, active FROM terms WHERE id = ?",
+      args: [id],
+    });
     return result.rows[0] as unknown as Term | undefined;
   }
 
@@ -65,7 +95,10 @@ export class StudyRepository {
   }
 
   async course(id: number): Promise<Course | undefined> {
-    const result = await db.execute({ sql: "SELECT id, term_id, title, sort_order, active FROM courses WHERE id = ?", args: [id] });
+    const result = await db.execute({
+      sql: "SELECT id, term_id, title, sort_order, active FROM courses WHERE id = ?",
+      args: [id],
+    });
     return result.rows[0] as unknown as Course | undefined;
   }
 
@@ -95,7 +128,10 @@ export class StudyRepository {
     return result.rows[0] as unknown as Resource | undefined;
   }
 
-  async createLevel(title: string, archiveYearId: number | null = null): Promise<number> {
+  async createLevel(
+    title: string,
+    archiveYearId: number | null = null,
+  ): Promise<number> {
     const result = await db.execute({
       sql: `INSERT INTO levels (title, archive_year_id, sort_order) VALUES (?, ?, COALESCE(
         (SELECT MAX(sort_order) + 1 FROM levels WHERE archive_year_id IS ?), 0))`,
@@ -128,41 +164,77 @@ export class StudyRepository {
     return idOf(result.lastInsertRowid);
   }
 
-  async rename(entity: "level" | "term" | "course" | "folder", id: number, title: string): Promise<void> {
-    const table = { level: "levels", term: "terms", course: "courses", folder: "folders" }[entity];
-    await db.execute({ sql: `UPDATE ${table} SET title = ? WHERE id = ?`, args: [title, id] });
+  async rename(
+    entity: "level" | "term" | "course" | "folder",
+    id: number,
+    title: string,
+  ): Promise<void> {
+    const table = {
+      level: "levels",
+      term: "terms",
+      course: "courses",
+      folder: "folders",
+    }[entity];
+    await db.execute({
+      sql: `UPDATE ${table} SET title = ? WHERE id = ?`,
+      args: [title, id],
+    });
   }
 
   async toggleLevel(id: number): Promise<void> {
-    await db.execute({ sql: "UPDATE levels SET active = 1 - active WHERE id = ? AND archive_year_id IS NULL", args: [id] });
+    await db.execute({
+      sql: "UPDATE levels SET active = 1 - active WHERE id = ? AND archive_year_id IS NULL",
+      args: [id],
+    });
   }
 
   async toggleTerm(id: number): Promise<void> {
-    await db.execute({ sql: "UPDATE terms SET active = 1 - active WHERE id = ?", args: [id] });
+    await db.execute({
+      sql: "UPDATE terms SET active = 1 - active WHERE id = ?",
+      args: [id],
+    });
   }
 
   async toggleCourse(id: number): Promise<void> {
-    await db.execute({ sql: "UPDATE courses SET active = 1 - active WHERE id = ?", args: [id] });
+    await db.execute({
+      sql: "UPDATE courses SET active = 1 - active WHERE id = ?",
+      args: [id],
+    });
   }
 
   async toggleFolder(id: number): Promise<void> {
-    await db.execute({ sql: "UPDATE folders SET active = 1 - active WHERE id = ?", args: [id] });
+    await db.execute({
+      sql: "UPDATE folders SET active = 1 - active WHERE id = ?",
+      args: [id],
+    });
   }
 
   async moveFolder(id: number, direction: -1 | 1): Promise<void> {
     const rows = await db.execute({
       sql: "SELECT id, sort_order FROM folders WHERE active = 1 ORDER BY sort_order, id",
     });
-    const folders = rows.rows as unknown as Array<{ id: number; sort_order: number }>;
+    const folders = rows.rows as unknown as Array<{
+      id: number;
+      sort_order: number;
+    }>;
     const index = folders.findIndex((folder) => folder.id === id);
     const other = folders[index + direction];
     const current = folders[index];
     if (!current || !other) return;
     const tx = await db.transaction("write");
     try {
-      await tx.execute({ sql: "UPDATE folders SET sort_order = ? WHERE id = ?", args: [-1, current.id] });
-      await tx.execute({ sql: "UPDATE folders SET sort_order = ? WHERE id = ?", args: [current.sort_order, other.id] });
-      await tx.execute({ sql: "UPDATE folders SET sort_order = ? WHERE id = ?", args: [other.sort_order, current.id] });
+      await tx.execute({
+        sql: "UPDATE folders SET sort_order = ? WHERE id = ?",
+        args: [-1, current.id],
+      });
+      await tx.execute({
+        sql: "UPDATE folders SET sort_order = ? WHERE id = ?",
+        args: [current.sort_order, other.id],
+      });
+      await tx.execute({
+        sql: "UPDATE folders SET sort_order = ? WHERE id = ?",
+        args: [other.sort_order, current.id],
+      });
       await tx.commit();
     } catch (error) {
       await tx.rollback();
@@ -171,40 +243,66 @@ export class StudyRepository {
   }
 
   async archiveYears(): Promise<ArchiveYear[]> {
-    const result = await db.execute("SELECT id, title FROM archive_years ORDER BY title DESC");
+    const result = await db.execute(
+      "SELECT id, title FROM archive_years ORDER BY title DESC",
+    );
     return result.rows as unknown as ArchiveYear[];
   }
 
   async archiveYear(id: number): Promise<ArchiveYear | undefined> {
-    const result = await db.execute({ sql: "SELECT id, title FROM archive_years WHERE id = ?", args: [id] });
+    const result = await db.execute({
+      sql: "SELECT id, title FROM archive_years WHERE id = ?",
+      args: [id],
+    });
     return result.rows[0] as unknown as ArchiveYear | undefined;
   }
 
   async createArchiveYear(title: string): Promise<number> {
-    const result = await db.execute({ sql: "INSERT INTO archive_years (title) VALUES (?)", args: [title] });
+    const result = await db.execute({
+      sql: "INSERT INTO archive_years (title) VALUES (?)",
+      args: [title],
+    });
     return idOf(result.lastInsertRowid);
   }
 
   async snapshotLevel(levelId: number, archiveYearId: number): Promise<number> {
     const tx = await db.transaction("write");
     try {
-      const source = await tx.execute({ sql: "SELECT title FROM levels WHERE id = ?", args: [levelId] });
+      const source = await tx.execute({
+        sql: "SELECT title FROM levels WHERE id = ?",
+        args: [levelId],
+      });
       const sourceTitle = source.rows[0]?.title;
-      if (typeof sourceTitle !== "string") throw new Error("The selected level no longer exists.");
+      if (typeof sourceTitle !== "string")
+        throw new Error("The selected level no longer exists.");
       const newLevel = await tx.execute({
         sql: "INSERT INTO levels (title, sort_order, archive_year_id) VALUES (?, 0, ?)",
         args: [sourceTitle, archiveYearId],
       });
       const newLevelId = idOf(newLevel.lastInsertRowid);
-      const terms = await tx.execute({ sql: "SELECT id, title, sort_order FROM terms WHERE level_id = ?", args: [levelId] });
-      for (const term of terms.rows as unknown as Array<{ id: number; title: string; sort_order: number }>) {
+      const terms = await tx.execute({
+        sql: "SELECT id, title, sort_order FROM terms WHERE level_id = ?",
+        args: [levelId],
+      });
+      for (const term of terms.rows as unknown as Array<{
+        id: number;
+        title: string;
+        sort_order: number;
+      }>) {
         const newTerm = await tx.execute({
           sql: "INSERT INTO terms (level_id, title, sort_order, active) VALUES (?, ?, ?, 1)",
           args: [newLevelId, term.title, term.sort_order],
         });
         const newTermId = idOf(newTerm.lastInsertRowid);
-        const courses = await tx.execute({ sql: "SELECT id, title, sort_order FROM courses WHERE term_id = ?", args: [term.id] });
-        for (const course of courses.rows as unknown as Array<{ id: number; title: string; sort_order: number }>) {
+        const courses = await tx.execute({
+          sql: "SELECT id, title, sort_order FROM courses WHERE term_id = ?",
+          args: [term.id],
+        });
+        for (const course of courses.rows as unknown as Array<{
+          id: number;
+          title: string;
+          sort_order: number;
+        }>) {
           const newCourse = await tx.execute({
             sql: "INSERT INTO courses (term_id, title, sort_order, active) VALUES (?, ?, ?, 1)",
             args: [newTermId, course.title, course.sort_order],
@@ -220,7 +318,10 @@ export class StudyRepository {
           });
         }
       }
-      await tx.execute({ sql: "UPDATE levels SET active = 0 WHERE id = ? AND archive_year_id IS NULL", args: [levelId] });
+      await tx.execute({
+        sql: "UPDATE levels SET active = 0 WHERE id = ? AND archive_year_id IS NULL",
+        args: [levelId],
+      });
       await tx.commit();
       return newLevelId;
     } catch (error) {
@@ -261,7 +362,19 @@ export class StudyRepository {
     });
   }
 
-  async search(keyword: string): Promise<Array<Resource & { course_title: string; folder_title: string; level_title: string; term_title: string; archive_title: string | null }>> {
+  async search(
+    keyword: string,
+  ): Promise<
+    Array<
+      Resource & {
+        course_title: string;
+        folder_title: string;
+        level_title: string;
+        term_title: string;
+        archive_title: string | null;
+      }
+    >
+  > {
     const result = await db.execute({
       sql: `SELECT r.id, r.course_id, r.folder_id, r.file_id, r.file_unique_id, r.file_type, r.file_name,
                    r.mime_type, r.title, r.caption, c.title AS course_title, f.title AS folder_title,
@@ -278,17 +391,29 @@ export class StudyRepository {
             ORDER BY r.id DESC LIMIT 10`,
       args: [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`],
     });
-    return result.rows as unknown as Array<Resource & { course_title: string; folder_title: string; level_title: string; term_title: string; archive_title: string | null }>;
+    return result.rows as unknown as Array<
+      Resource & {
+        course_title: string;
+        folder_title: string;
+        level_title: string;
+        term_title: string;
+        archive_title: string | null;
+      }
+    >;
   }
 
-  async usersForBroadcast(target: "all" | "level" | "term", targetId?: number): Promise<number[]> {
+  async usersForBroadcast(
+    target: "all" | "level" | "term",
+    targetId?: number,
+  ): Promise<number[]> {
     if (target === "all") {
       const result = await db.execute("SELECT id FROM users WHERE blocked = 0");
       return result.rows.map((row) => Number(row.id));
     }
-    const sql = target === "level"
-      ? "SELECT id FROM users WHERE blocked = 0 AND level_id = ?"
-      : "SELECT u.id FROM users u JOIN terms t ON t.id = u.term_id WHERE u.blocked = 0 AND t.id = ?";
+    const sql =
+      target === "level"
+        ? "SELECT id FROM users WHERE blocked = 0 AND level_id = ?"
+        : "SELECT u.id FROM users u JOIN terms t ON t.id = u.term_id WHERE u.blocked = 0 AND t.id = ?";
     const result = await db.execute({ sql, args: [targetId ?? 0] });
     return result.rows.map((row) => Number(row.id));
   }

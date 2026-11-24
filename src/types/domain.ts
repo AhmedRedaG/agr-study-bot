@@ -48,11 +48,32 @@ export interface ArchiveYear {
 }
 
 export type AdminState =
-  | { kind: "text"; action: "add-level" | "add-term" | "add-course" | "add-folder" | "rename" | "create-archive"; parentId?: number; entity?: string; entityId?: number; archiveYearId?: number }
+  | {
+      kind: "text";
+      action:
+        | "add-level"
+        | "add-term"
+        | "add-course"
+        | "add-folder"
+        | "rename"
+        | "create-archive";
+      parentId?: number;
+      entity?: string;
+      entityId?: number;
+      archiveYearId?: number;
+    }
   | { kind: "search" }
   | { kind: "my-level" }
   | { kind: "my-term"; levelId: number }
   | { kind: "feedback" }
   | { kind: "upload"; courseId: number; folderId: number }
-  | { kind: "broadcast-target"; target: "all" | "level" | "term"; targetId?: number }
-  | { kind: "broadcast-message"; target: "all" | "level" | "term"; targetId?: number };
+  | {
+      kind: "broadcast-target";
+      target: "all" | "level" | "term";
+      targetId?: number;
+    }
+  | {
+      kind: "broadcast-message";
+      target: "all" | "level" | "term";
+      targetId?: number;
+    };

@@ -83,18 +83,6 @@ let initialized: Promise<void> | undefined;
 export function ensureSchema(): Promise<void> {
   initialized ??= (async () => {
     await db.executeMultiple(schema);
-    for (const [index, title] of [
-      "محاضرات / Lectures",
-      "سكاشن / Sections",
-      "ملخصات / Summaries",
-      "امتحانات سابقة / Past Exams",
-      "كتب / Books",
-    ].entries()) {
-      await db.execute({
-        sql: "INSERT OR IGNORE INTO folders (title, sort_order) VALUES (?, ?)",
-        args: [title, index],
-      });
-    }
   })().catch((error: unknown) => {
     initialized = undefined;
     throw error;

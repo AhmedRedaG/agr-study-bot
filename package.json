@@ -1,18 +1,26 @@
 {
   "name": "arg-study-bot",
   "version": "1.0.0",
-  "description": "A production-ready academic resource bot for AGR Study.",
-  "main": "dist/index.js",
+  "description": "Production-grade Telegram educational platform bot for AGR Study using grammY and Turso.",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "db:init": "tsx scripts/init-db.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": [],
+  "keywords": [
+    "telegram",
+    "bot",
+    "grammy",
+    "turso",
+    "libsql",
+    "education",
+    "study"
+  ],
   "author": "Ahmed Reda",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@libsql/client": "^0.18.0",
@@ -24,5 +32,8 @@
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }

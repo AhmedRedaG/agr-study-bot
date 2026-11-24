@@ -75,8 +75,8 @@ CREATE INDEX IF NOT EXISTS idx_resources_search ON resources(title, file_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON user_sessions(expires_at);
 
 INSERT OR IGNORE INTO folders (title, sort_order) VALUES
-  ('محاضرات / Lectures', 0),
-  ('سكاشن / Sections', 1),
-  ('ملخصات / Summaries', 2),
-  ('امتحانات سابقة / Past Exams', 3),
-  ('كتب / Books', 4);
+  ('كتب', 0),
+  ('محاضرات', 1),
+  ('سكاشن', 2),
+  ('ملخصات', 3),
+  ('امتحانات سابقة', 4);

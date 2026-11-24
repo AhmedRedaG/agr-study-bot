@@ -23,18 +23,18 @@ Repositories own SQL access; handlers translate Telegram updates into service/re
 
 Copy `.env.example` to `.env` for local work and fill in:
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `BOT_TOKEN` | Yes | Telegram bot token |
-| `ADMIN_IDS` | Yes | Comma-separated Telegram user IDs allowed to use `/admin` |
-| `TURSO_DATABASE_URL` | Yes | Turso `libsql://...` database URL |
-| `TURSO_AUTH_TOKEN` | Yes | Turso database auth token |
-| `WEBHOOK_SECRET_TOKEN` | Production recommended | Validates Telegram's webhook secret header |
-| `ARCHIVE_CHANNEL_ID` | No | Optional private channel for upload metadata and a backup copy |
-| `REQUIRED_CHANNEL_ID` | No | Channel ID/username used for optional force-subscribe verification |
-| `REQUIRED_CHANNEL_USERNAME` | No | Public channel username used to build the join button |
-| `SUPPORT_CONTACT` | No | Contact handle, email, or support URL shown in Contact Us |
-| `BROADCAST_DELAY_MS` | No | Delay between broadcast recipients; defaults to 45 ms (minimum 35 ms) |
+| Variable                    | Required               | Purpose                                                               |
+| --------------------------- | ---------------------- | --------------------------------------------------------------------- |
+| `BOT_TOKEN`                 | Yes                    | Telegram bot token                                                    |
+| `ADMIN_IDS`                 | Yes                    | Comma-separated Telegram user IDs allowed to use `/admin`             |
+| `TURSO_DATABASE_URL`        | Yes                    | Turso `libsql://...` database URL                                     |
+| `TURSO_AUTH_TOKEN`          | Yes                    | Turso database auth token                                             |
+| `WEBHOOK_SECRET_TOKEN`      | Production recommended | Validates Telegram's webhook secret header                            |
+| `ARCHIVE_CHANNEL_ID`        | No                     | Optional private channel for upload metadata and a backup copy        |
+| `REQUIRED_CHANNEL_ID`       | No                     | Channel ID/username used for optional force-subscribe verification    |
+| `REQUIRED_CHANNEL_USERNAME` | No                     | Public channel username used to build the join button                 |
+| `SUPPORT_CONTACT`           | No                     | Contact handle, email, or support URL shown in Contact Us             |
+| `BROADCAST_DELAY_MS`        | No                     | Delay between broadcast recipients; defaults to 45 ms (minimum 35 ms) |
 
 Keep tokens out of source control. The bot needs administrator access to the required channel to reliably verify membership. For upload backups, grant the bot permission to post in the archive channel.
 

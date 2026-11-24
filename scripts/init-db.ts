@@ -3,11 +3,11 @@ import { db } from "../src/db/client.js";
 
 await ensureSchema();
 for (const [index, title] of [
-  "محاضرات / Lectures",
-  "سكاشن / Sections",
-  "ملخصات / Summaries",
-  "امتحانات سابقة / Past Exams",
-  "كتب / Books",
+  "كتب",
+  "محاضرات",
+  "سكاشن",
+  "ملخصات",
+  "امتحانات سابقة",
 ].entries()) {
   await db.execute({
     sql: "INSERT OR IGNORE INTO folders (title, sort_order) VALUES (?, ?)",

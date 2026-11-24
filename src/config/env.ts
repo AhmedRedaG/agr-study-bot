@@ -10,10 +10,17 @@ function optional(name: string): string | undefined {
   return process.env[name]?.trim() || undefined;
 }
 
-const configuredAdminIds = required("ADMIN_IDS").split(",").map((id) => Number(id.trim()));
+const configuredAdminIds = required("ADMIN_IDS")
+  .split(",")
+  .map((id) => Number(id.trim()));
 
-if (configuredAdminIds.length === 0 || configuredAdminIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
-  throw new Error("ADMIN_IDS must contain at least one valid Telegram user ID.");
+if (
+  configuredAdminIds.length === 0 ||
+  configuredAdminIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+) {
+  throw new Error(
+    "ADMIN_IDS must contain at least one valid Telegram user ID.",
+  );
 }
 const broadcastDelayMs = Number(process.env.BROADCAST_DELAY_MS ?? 45);
 if (!Number.isFinite(broadcastDelayMs) || broadcastDelayMs < 0) {
