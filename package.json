@@ -1,0 +1,28 @@
+{
+  "name": "arg-study-bot",
+  "version": "1.0.0",
+  "description": "A production-ready academic resource bot for AGR Study.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:init": "tsx scripts/init-db.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "Ahmed Reda",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@vercel/functions": "^3.11.3",
+    "dotenv": "^18.0.10",
+    "grammy": "^1.48.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
