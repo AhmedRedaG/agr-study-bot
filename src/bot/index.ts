@@ -10,6 +10,7 @@ import type { AdminState, Resource, ResourceGroup } from "../types/domain.js";
 import {
   archivesKeyboard,
   coursesKeyboard,
+  displayTermTitle,
   foldersKeyboard,
   labels,
   levelsKeyboard,
@@ -62,6 +63,10 @@ function buttonLabel(label: string): string {
   return characters.length <= 64
     ? label
     : `${characters.slice(0, 63).join("")}…`;
+}
+
+function needsFullWidthButton(label: string): boolean {
+  return Array.from(label).length > 24;
 }
 
 function navigation(back?: string): InlineKeyboard {
@@ -246,7 +251,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
       section(
         level.title,
         terms.length
-          ? "اختر الفصل الدراسي."
+          ? "اختر الترم الدراسي."
           : "لا توجد فصول دراسية مضافة لهذه الفرقة بعد.",
       ),
       termsKeyboard(terms, "nav:t", back),
@@ -256,28 +261,110 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     const term = await content.term(id);
     if (!term || !term.active) return sendHome(ctx);
     const level = await content.level(term.level_id);
+    if (!level?.active) return sendHome(ctx);
     const courses = await content.courses(id);
+    const allDepartments = level
+      ? await content.departments(level.id, false)
+      : [];
+    const departments = allDepartments.filter((department) => department.active);
     const back =
       level?.archive_year_id === null
         ? `nav:l:${term.level_id}`
         : `nav:al:${term.level_id}`;
+    if (allDepartments.length > 0) {
+      const sharedCourses = courses.filter(
+        (course) => course.department_id === null,
+      );
+      const keyboard = new InlineKeyboard();
+      for (const course of sharedCourses) {
+        keyboard.text(buttonLabel(course.title), `nav:c:${course.id}`).row();
+      }
+      for (const department of departments) {
+        keyboard
+          .text(
+            buttonLabel(`🏛️ قسم ${department.title}`),
+            `nav:d:${term.id}:${department.id}`,
+          )
+          .row();
+      }
+      withNavigation(keyboard, back);
+      return show(
+        ctx,
+        section(
+          `${level.title} · ${displayTermTitle(term.title)}`,
+          departments.length
+            ? sharedCourses.length
+              ? "اختر مادة مشتركة أو قسمًا لاستعراض مقرراته."
+              : "لا توجد مواد مشتركة. اختر قسمًا لاستعراض مقرراته."
+            : sharedCourses.length
+              ? "الأقسام غير متاحة حاليًا؛ يمكنك استعراض المواد المشتركة."
+              : "لا توجد مواد أو أقسام متاحة في هذا الترم.",
+        ),
+        keyboard,
+      );
+    }
     return show(
       ctx,
       section(
-        term.title,
+        `${level.title} · ${displayTermTitle(term.title)}`,
         courses.length
           ? "اختر المقرر."
-          : "لا توجد مقررات في هذا الفصل حتى الآن.",
+          : "لا توجد مقررات في هذا الترم حتى الآن.",
       ),
       coursesKeyboard(courses, "nav:c", back),
+    );
+  }
+  if (
+    area === "nav" &&
+    action === "d" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(other)
+  ) {
+    const term = await content.term(id);
+    const department = await content.department(other);
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (
+      !term?.active ||
+      !level?.active ||
+      !department?.active ||
+      department.level_id !== term.level_id
+    ) {
+      return sendHome(ctx);
+    }
+    const courses = await content.coursesForDepartment(term.id, department.id);
+    const keyboard = new InlineKeyboard();
+    for (const course of courses) {
+      keyboard.text(buttonLabel(course.title), `nav:c:${course.id}`).row();
+    }
+    withNavigation(keyboard, `nav:t:${term.id}`);
+    return show(
+      ctx,
+      section(
+        `${level.title} · 🏛️ قسم ${department.title} · ${displayTermTitle(term.title)}`,
+        courses.length
+          ? "اختر المقرر."
+          : "لا توجد مقررات لهذا القسم في هذا الترم.",
+      ),
+      keyboard,
     );
   }
   if (area === "nav" && action === "c" && Number.isSafeInteger(id)) {
     const course = await content.course(id);
     if (!course || !course.active) return sendHome(ctx);
-    const folders = await content.folders();
     const term = await content.term(course.term_id);
-    const back = term ? `nav:t:${term.id}` : "nav:home";
+    const level = term ? await content.level(term.level_id) : undefined;
+    if (!term?.active || !level?.active) return sendHome(ctx);
+    if (course.department_id !== null) {
+      const department = await content.department(course.department_id);
+      if (
+        !department?.active ||
+        department.level_id !== term.level_id
+      ) {
+        return sendHome(ctx);
+      }
+    }
+    const folders = await content.folders();
+    const back = `nav:t:${term.id}`;
     return show(
       ctx,
       section(
@@ -301,6 +388,12 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     const folder = (await content.folders()).find((item) => item.id === other);
     if (!course?.active || !term?.active || !level?.active || !folder) {
       return sendHome(ctx);
+    }
+    if (course.department_id !== null) {
+      const department = await content.department(course.department_id);
+      if (!department?.active || department.level_id !== level.id) {
+        return sendHome(ctx);
+      }
     }
     const total = await content.countResourceGroups(id, other);
     const pageCount = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE));
@@ -419,8 +512,10 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
         (preferred.termId === null || term?.active)
       ) {
         const keyboard = navigation("nav:home");
-        keyboard.row().text("✏️ تغيير الفرقة أو الفصل", "my:choose");
-        const current = term ? `${level.title} · ${term.title}` : level.title;
+        keyboard.row().text("✏️ تغيير الفرقة أو الترم", "my:choose");
+        const current = term
+          ? `${level.title} · ${displayTermTitle(term.title)}`
+          : level.title;
         keyboard
           .row()
           .text(
@@ -448,7 +543,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     const levels = await content.currentLevels();
     return show(
       ctx,
-      section("تغيير فرقتي الحالية", "اختر فرقتك ثم الفصل الدراسي الذي تفضله."),
+      section("تغيير فرقتي الحالية", "اختر فرقتك ثم الترم الذي تفضله."),
       levelsKeyboard(levels, "my:l", "nav:my"),
     );
   }
@@ -461,7 +556,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     keyboard.row().text("حفظ الفرقة فقط", `my:skip:${id}`);
     return show(
       ctx,
-      section("اختيار الفصل", "اختر فصلك الدراسي، أو احفظ الفرقة فقط."),
+      section("اختيار الترم", "اختر الترم الدراسي، أو احفظ الفرقة فقط."),
       keyboard,
     );
   }
@@ -483,7 +578,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     return show(
       ctx,
       section(
-        "تم حفظ الفرقة والفصل",
+        "تم حفظ الفرقة والترم",
         "ستجد اختيارك محفوظًا في «فرقتي الحالية».",
       ),
       navigation("nav:home"),
@@ -494,7 +589,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
       ctx,
       section(
         "نبذة عن AGR Study",
-        "منصة تعليمية منظمة للوصول إلى الكتب والمحاضرات والسكاشن والملخصات والامتحانات السابقة وأرشيف السنوات.\n\nابدأ باختيار الفرقة ثم الفصل والمقرر ونوع المحتوى، أو استخدم البحث للوصول السريع.\n\nالإصدار: " +
+        "منصة تعليمية منظمة للوصول إلى الكتب والمحاضرات والسكاشن والملخصات والامتحانات السابقة وأرشيف السنوات.\n\nابدأ باختيار الفرقة ثم الترم؛ ستظهر المواد المشتركة والأقسام المتاحة، وبعدها اختر المقرر ونوع المحتوى. يمكنك أيضًا استخدام البحث للوصول السريع.\n\nالإصدار: " +
           env.appVersion +
           "\nالحالة: تعمل الخدمة عبر Telegram.",
       ),
@@ -610,10 +705,21 @@ async function sendResourceGroup(
   const course = await content.course(group.course_id);
   const term = course ? await content.term(course.term_id) : undefined;
   const level = term ? await content.level(term.level_id) : undefined;
+  const department =
+    course && course.department_id !== null
+      ? await content.department(course.department_id)
+      : undefined;
   const folder = (await content.folders()).find(
     (item) => item.id === group.folder_id,
   );
-  if (!course?.active || !term?.active || !level?.active || !folder) {
+  if (
+    !course?.active ||
+    !term?.active ||
+    !level?.active ||
+    !folder ||
+    (course.department_id !== null &&
+      (!department?.active || department.level_id !== level.id))
+  ) {
     return show(
       ctx,
       section("المحتوى غير متاح", "لم يعد هذا المورد منشورًا للطلاب."),
@@ -675,7 +781,7 @@ async function showAdminResourceLevels(ctx: Context): Promise<void> {
   const levels = await content.currentLevels();
   return show(
     ctx,
-    section("إدارة الملفات", "اختر الفرقة ثم الفصل والمقرر ومجلد المحتوى."),
+    section("إدارة الملفات", "اختر الفرقة ثم الترم والمقرر ومجلد المحتوى."),
     levelsKeyboard(levels, "mg:l", "adm:home", "adm:home"),
   );
 }
@@ -876,7 +982,7 @@ async function routeManageCallback(
     }
     return show(
       ctx,
-      section(`إدارة ملفات ${level.title}`, "اختر الفصل الدراسي."),
+      section(`إدارة ملفات ${level.title}`, "اختر الترم الدراسي."),
       termsKeyboard(await content.terms(id), "mg:t", "adm:home", "adm:home"),
     );
   }
@@ -887,7 +993,7 @@ async function routeManageCallback(
     }
     return show(
       ctx,
-      section(`إدارة ملفات ${term.title}`, "اختر المقرر."),
+      section(`إدارة ملفات ${displayTermTitle(term.title)}`, "اختر المقرر."),
       coursesKeyboard(
         await content.courses(id),
         "mg:c",
@@ -1164,15 +1270,18 @@ async function showAdminLevel(ctx: Context, levelId: number): Promise<void> {
   const archived = level.is_archived && level.archive_year_id !== null;
   const termCallback = archived ? "adm:atm" : "adm:tm";
   const keyboard = new InlineKeyboard()
-    .text("＋ إضافة فصل", `adm:addterm:${levelId}`)
+    .text("＋ إضافة ترم", `adm:addterm:${levelId}`)
     .row();
   for (const term of terms) {
     keyboard
-      .text(term.title, `${termCallback}:${term.id}`)
+      .text(displayTermTitle(term.title), `${termCallback}:${term.id}`)
       .text(term.active ? "إخفاء" : "إظهار", `adm:hideterm:${term.id}`)
       .row();
-    keyboard.text("✏️ إعادة تسمية الفصل", `adm:rename:term:${term.id}`).row();
+    keyboard.text("✏️ إعادة تسمية الترم", `adm:rename:term:${term.id}`).row();
   }
+  keyboard
+    .text("🏛️ إدارة الأقسام", `adm:departments:${levelId}`)
+    .row();
   keyboard.text("✏️ إعادة تسمية الفرقة", `adm:rename:level:${levelId}`).row();
   const back =
     level.archive_year_id === null
@@ -1183,13 +1292,203 @@ async function showAdminLevel(ctx: Context, levelId: number): Promise<void> {
     ctx,
     section(
       `إدارة ${level.title}`,
-      terms.length ? "اختر فصلًا لإدارة مقرراته." : "لا توجد فصول بعد.",
+      terms.length ? "اختر ترمًا لإدارة مقرراته." : "لا توجد ترمات بعد.",
     ),
     keyboard,
   );
 }
 
-async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
+async function showAdminDepartments(
+  ctx: Context,
+  levelId: number,
+  notice?: string,
+): Promise<void> {
+  const level = await content.level(levelId);
+  if (!level) return showAdminLevels(ctx);
+  const departments = await content.departments(levelId, false);
+  const keyboard = new InlineKeyboard()
+    .text("＋ إضافة قسم", `adm:adddepartment:${levelId}`)
+    .row();
+  for (const department of departments) {
+    const label = buttonLabel(`🏛️ ${department.title}`);
+    const toggleLabel = department.active ? "إخفاء" : "إظهار";
+    if (needsFullWidthButton(label)) {
+      keyboard
+        .text(label, `adm:department:${department.id}`)
+        .row()
+        .text(toggleLabel, `adm:depttoggle:${department.id}`)
+        .row();
+    } else {
+      keyboard
+        .text(label, `adm:department:${department.id}`)
+        .text(toggleLabel, `adm:depttoggle:${department.id}`)
+        .row();
+    }
+    keyboard
+      .text("✏️ إعادة تسمية القسم", `adm:rename:department:${department.id}`)
+      .row();
+  }
+  withNavigation(
+    keyboard,
+    level.archive_year_id === null
+      ? `adm:lv:${levelId}`
+      : `adm:alv:${levelId}`,
+    "adm:home",
+  );
+  await show(
+    ctx,
+    section(
+      `أقسام ${level.title}`,
+      [
+        notice,
+        departments.length
+          ? "تظهر الأقسام النشطة للطلاب بعد اختيار الترم."
+          : "لا توجد أقسام بعد. المقررات الحالية ستبقى مواد مشتركة حتى تصنيفها.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminDepartment(
+  ctx: Context,
+  departmentId: number,
+): Promise<void> {
+  const department = await content.department(departmentId);
+  if (!department) return showAdminLevels(ctx);
+  const keyboard = new InlineKeyboard()
+    .text("＋ إضافة مقرر لهذا القسم", `adm:deptadd:${department.id}`)
+    .row()
+    .text(
+      department.active ? "إخفاء القسم" : "إظهار القسم",
+      `adm:depttoggle:${department.id}`,
+    )
+    .row()
+    .text("✏️ إعادة تسمية", `adm:rename:department:${department.id}`);
+  withNavigation(
+    keyboard,
+    `adm:departments:${department.level_id}`,
+    "adm:home",
+  );
+  await show(
+    ctx,
+    section(
+      `🏛️ ${department.title}`,
+      department.active
+        ? "القسم ظاهر للطلاب في ترمات هذه الفرقة."
+        : "القسم مخفي مؤقتًا عن الطلاب؛ مقرراته محفوظة.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminDepartmentTerms(
+  ctx: Context,
+  departmentId: number,
+): Promise<void> {
+  const department = await content.department(departmentId);
+  if (!department) return showAdminLevels(ctx);
+  const terms = await content.terms(department.level_id, false);
+  const keyboard = new InlineKeyboard();
+  for (const term of terms) {
+    keyboard
+      .text(
+        buttonLabel(
+          `${term.active ? "📚" : "⏸️"} ${displayTermTitle(term.title)}`,
+        ),
+        `adm:deptaddterm:${department.id}:${term.id}`,
+      )
+      .row();
+  }
+  withNavigation(keyboard, `adm:department:${department.id}`, "adm:home");
+  return show(
+    ctx,
+    section(
+      `إضافة مقرر إلى قسم ${department.title}`,
+      terms.length
+        ? "اختر الترم الذي سيُضاف إليه المقرر."
+        : "أضف ترمًا لهذه الفرقة أولًا.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAddCourseScope(
+  ctx: Context,
+  termId: number,
+): Promise<void> {
+  const term = await content.term(termId);
+  const level = term ? await content.level(term.level_id) : undefined;
+  if (!term || !level) return showAdminLevels(ctx);
+  const departments = await content.departments(level.id, false);
+  const archived = Boolean(level.is_archived && level.archive_year_id !== null);
+  const back = `${archived ? "adm:atm" : "adm:tm"}:${term.id}`;
+  const keyboard = new InlineKeyboard()
+    .text("🔗 مادة مشتركة", `adm:addcourse-shared:${term.id}`)
+    .row();
+  for (const department of departments) {
+    keyboard
+      .text(
+        buttonLabel(
+          `${department.active ? "🏛️" : "⏸️"} قسم ${department.title}`,
+        ),
+        `adm:addcourse-dept:${term.id}:${department.id}`,
+      )
+      .row();
+  }
+  withNavigation(keyboard, back, "adm:home");
+  return show(
+    ctx,
+    section(
+      "تصنيف المقرر الجديد",
+      `سيُضاف إلى ${displayTermTitle(term.title)} في ${level.title}. اختر مادة مشتركة أو قسمًا محددًا.`,
+    ),
+    keyboard,
+  );
+}
+
+async function promptAddCourse(
+  ctx: Context,
+  termId: number,
+  departmentId: number | null,
+): Promise<void> {
+  const term = await content.term(termId);
+  if (!term) return showAdminLevels(ctx);
+  const department =
+    departmentId === null
+      ? undefined
+      : await content.department(departmentId);
+  if (
+    departmentId !== null &&
+    (!department || department.level_id !== term.level_id)
+  ) {
+    return showAdminTerm(ctx, termId);
+  }
+  if (ctx.from) {
+    await users.setState(ctx.from.id, {
+      kind: "text",
+      action: "add-course",
+      parentId: term.id,
+      departmentId,
+    });
+  }
+  return show(
+    ctx,
+    section(
+      "إضافة مقرر",
+      `سيُضاف إلى ${displayTermTitle(term.title)} · ${department ? `قسم ${department.title}` : "مواد مشتركة"}. أرسل اسم المقرر.`,
+    ),
+    adminNavigation("adm:home"),
+  );
+}
+
+async function showAdminTerm(
+  ctx: Context,
+  termId: number,
+  notice?: string,
+): Promise<void> {
   const term = await content.term(termId);
   if (!term) return showAdminLevels(ctx);
   const level = await content.level(term.level_id);
@@ -1198,19 +1497,35 @@ async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
   );
   const courseCallback = archived ? "adm:acr" : "adm:cr";
   const courses = await content.courses(termId, false);
+  const departments = await content.departments(term.level_id, false);
+  const departmentTitles = new Map(
+    departments.map((department) => [department.id, department.title]),
+  );
   const keyboard = new InlineKeyboard()
     .text("＋ إضافة مقرر", `adm:addcourse:${termId}`)
     .row();
   for (const course of courses) {
-    keyboard
-      .text(course.title, `${courseCallback}:${course.id}`)
-      .text(course.active ? "إخفاء" : "إظهار", `adm:hidecourse:${course.id}`)
-      .row();
+    const label = buttonLabel(
+      `${course.department_id === null ? "🔗 مشترك" : `🏛️ ${departmentTitles.get(course.department_id) ?? "قسم"}`} · ${course.title}`,
+    );
+    const toggleLabel = course.active ? "إخفاء" : "إظهار";
+    if (needsFullWidthButton(label)) {
+      keyboard
+        .text(label, `${courseCallback}:${course.id}`)
+        .row()
+        .text(toggleLabel, `adm:hidecourse:${course.id}`)
+        .row();
+    } else {
+      keyboard
+        .text(label, `${courseCallback}:${course.id}`)
+        .text(toggleLabel, `adm:hidecourse:${course.id}`)
+        .row();
+    }
     keyboard
       .text("✏️ إعادة تسمية المقرر", `adm:rename:course:${course.id}`)
       .row();
   }
-  keyboard.text("✏️ إعادة تسمية الفصل", `adm:rename:term:${termId}`).row();
+  keyboard.text("✏️ إعادة تسمية الترم", `adm:rename:term:${termId}`).row();
   withNavigation(
     keyboard,
     archived && level?.archive_year_id !== null
@@ -1221,8 +1536,13 @@ async function showAdminTerm(ctx: Context, termId: number): Promise<void> {
   await show(
     ctx,
     section(
-      `إدارة ${term.title}`,
-      courses.length ? "اختر مقررًا لإدارته." : "لا توجد مقررات بعد.",
+      `إدارة ${displayTermTitle(term.title)}`,
+      [
+        notice,
+        courses.length ? "اختر مقررًا لإدارته." : "لا توجد مقررات بعد.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     ),
     keyboard,
   );
@@ -1236,7 +1556,21 @@ async function showAdminCourse(ctx: Context, courseId: number): Promise<void> {
   const archived = Boolean(
     level?.is_archived && level.archive_year_id !== null,
   );
+  const department =
+    course.department_id === null
+      ? undefined
+      : await content.department(course.department_id);
   const keyboard = new InlineKeyboard();
+  keyboard
+    .text(
+      buttonLabel(
+        course.department_id === null
+          ? "🔗 التصنيف: مواد مشتركة"
+          : `🏛️ التصنيف: ${department?.title ?? "قسم غير موجود"}`,
+      ),
+      `adm:assign:${courseId}`,
+    )
+    .row();
   if (!archived) {
     keyboard.text("📤 رفع ملفات لهذا المقرر", `up:c:${courseId}`).row();
   }
@@ -1368,6 +1702,50 @@ async function routeAdminCallback(
   }
   if (action === "student") return sendHome(ctx);
   if (action === "levels") return showAdminLevels(ctx);
+  if (action === "departments" && Number.isSafeInteger(id))
+    return showAdminDepartments(ctx, id);
+  if (action === "department" && Number.isSafeInteger(id))
+    return showAdminDepartment(ctx, id);
+  if (action === "deptadd" && Number.isSafeInteger(id))
+    return showAdminDepartmentTerms(ctx, id);
+  if (
+    action === "deptaddterm" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    const department = await content.department(id);
+    const term = await content.term(Number(extra));
+    if (!department || term?.level_id !== department.level_id) {
+      return showAdminDepartment(ctx, id);
+    }
+    return promptAddCourse(ctx, term.id, department.id);
+  }
+  if (action === "depttoggle" && Number.isSafeInteger(id)) {
+    const department = await content.department(id);
+    if (!department) return showAdminLevels(ctx);
+    await study.toggleDepartment(id);
+    return showAdminDepartments(
+      ctx,
+      department.level_id,
+      department.active ? "تم إخفاء القسم." : "تم إظهار القسم.",
+    );
+  }
+  if (action === "adddepartment" && Number.isSafeInteger(id)) {
+    const level = await content.level(id);
+    if (!level) return showAdminLevels(ctx);
+    if (ctx.from) {
+      await users.setState(ctx.from.id, {
+        kind: "text",
+        action: "add-department",
+        parentId: id,
+      });
+    }
+    return show(
+      ctx,
+      section("إضافة قسم", `أرسل اسم القسم الجديد في ${level.title}.`),
+      adminNavigation(`adm:departments:${id}`),
+    );
+  }
   if (action === "resources") return showAdminResourceLevels(ctx);
   if (action === "folders") return showAdminFolders(ctx);
   if (action === "archive") return showAdminArchives(ctx);
@@ -1375,7 +1753,7 @@ async function routeAdminCallback(
     const levels = await content.currentLevels();
     return show(
       ctx,
-      section("رفع ملفات", "اختر الفرقة ثم الفصل والمقرر ومجلد الوجهة."),
+      section("رفع ملفات", "اختر الفرقة ثم الترم والمقرر ومجلد الوجهة."),
       levelsKeyboard(levels, "up:l", "adm:home", "adm:home"),
     );
   }
@@ -1385,7 +1763,7 @@ async function routeAdminCallback(
       .row()
       .text("فرقة محددة", "adm:bl:level")
       .row()
-      .text("فصل محدد", "adm:bl:term")
+      .text("ترم محدد", "adm:bl:term")
       .row();
     withNavigation(keyboard, "adm:home", "adm:home");
     return show(
@@ -1423,7 +1801,7 @@ async function routeAdminCallback(
     const levels = await content.currentLevels();
     return show(
       ctx,
-      section("اختيار الفرقة", "اختر الفرقة للوصول إلى فصولها."),
+      section("اختيار الفرقة", "اختر الفرقة للوصول إلى ترماتها."),
       levelsKeyboard(levels, "adm:blterm", "adm:broadcast", "adm:home"),
     );
   }
@@ -1451,8 +1829,8 @@ async function routeAdminCallback(
     return show(
       ctx,
       section(
-        "اختيار الفصل",
-        "سيصل الإعلان إلى المستخدمين الذين حفظوا هذا الفصل.",
+        "اختيار الترم",
+        "سيصل الإعلان إلى المستخدمين الذين حفظوا هذا الترم.",
       ),
       termsKeyboard(terms, "adm:bltermid", "adm:broadcast", "adm:home"),
     );
@@ -1473,7 +1851,7 @@ async function routeAdminCallback(
       ctx,
       section(
         "نص الإعلان",
-        "أرسل الرسالة أو الوسائط لإرسالها إلى جمهور هذا الفصل.",
+        "أرسل الرسالة أو الوسائط لإرسالها إلى جمهور هذا الترم.",
       ),
       adminNavigation("adm:broadcast"),
     );
@@ -1504,26 +1882,22 @@ async function routeAdminCallback(
       });
     return show(
       ctx,
-      section("إضافة فصل", "أرسل اسم الفصل الدراسي."),
+      section("إضافة ترم", "أرسل اسم الترم الدراسي."),
       adminNavigation(level.is_archived ? `adm:alv:${id}` : `adm:lv:${id}`),
     );
   }
   if (action === "addcourse" && Number.isSafeInteger(id)) {
-    const term = await content.term(id);
-    const level = term ? await content.level(term.level_id) : undefined;
-    if (!term || !level) return showAdminLevels(ctx);
-    const archived = level.is_archived && level.archive_year_id !== null;
-    if (ctx.from)
-      await users.setState(ctx.from.id, {
-        kind: "text",
-        action: "add-course",
-        parentId: id,
-      });
-    return show(
-      ctx,
-      section("إضافة مقرر", "أرسل اسم المقرر."),
-      adminNavigation(`${archived ? "adm:atm" : "adm:tm"}:${id}`),
-    );
+    return showAddCourseScope(ctx, id);
+  }
+  if (action === "addcourse-shared" && Number.isSafeInteger(id)) {
+    return promptAddCourse(ctx, id, null);
+  }
+  if (
+    action === "addcourse-dept" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    return promptAddCourse(ctx, id, Number(extra));
   }
   if (action === "addfolder") {
     if (ctx.from)
@@ -1539,10 +1913,15 @@ async function routeAdminCallback(
   }
   if (
     action === "rename" &&
-    ["level", "term", "course", "folder"].includes(raw ?? "") &&
+    ["level", "term", "course", "folder", "department"].includes(raw ?? "") &&
     Number.isSafeInteger(Number(extra))
   ) {
-    const entity = raw as "level" | "term" | "course" | "folder";
+    const entity = raw as
+      | "level"
+      | "term"
+      | "course"
+      | "folder"
+      | "department";
     if (ctx.from)
       await users.setState(ctx.from.id, {
         kind: "text",
@@ -1579,6 +1958,61 @@ async function routeAdminCallback(
     const course = await content.course(id);
     if (course) return showAdminTerm(ctx, course.term_id);
     return showAdminLevels(ctx);
+  }
+  if (action === "assign" && Number.isSafeInteger(id)) {
+    const course = await content.course(id);
+    const term = course ? await content.term(course.term_id) : undefined;
+    if (!course || !term) return showAdminLevels(ctx);
+    const departments = await content.departments(term.level_id, false);
+    const current =
+      course.department_id === null
+        ? "🔗 مواد مشتركة"
+        : (await content.department(course.department_id))?.title ??
+          "قسم غير موجود";
+    const keyboard = new InlineKeyboard()
+      .text(
+        `${course.department_id === null ? "✓ " : ""}🔗 مواد مشتركة`,
+        `adm:assignshared:${course.id}`,
+      )
+      .row();
+    for (const department of departments) {
+      keyboard
+        .text(
+          buttonLabel(
+            `${course.department_id === department.id ? "✓ " : ""}${department.active ? "🏛️" : "⏸️"} ${department.title}`,
+          ),
+          `adm:assigndept:${course.id}:${department.id}`,
+        )
+        .row();
+    }
+    const level = await content.level(term.level_id);
+    withNavigation(
+      keyboard,
+      level?.is_archived
+        ? `adm:acr:${course.id}`
+        : `adm:cr:${course.id}`,
+      "adm:home",
+    );
+    return show(
+      ctx,
+      section(
+        `تصنيف ${course.title}`,
+        `التصنيف الحالي: ${current}\nاختر مواد مشتركة أو قسمًا من أقسام الفرقة.`,
+      ),
+      keyboard,
+    );
+  }
+  if (action === "assignshared" && Number.isSafeInteger(id)) {
+    await study.assignCourseDepartment(id, null);
+    return showAdminCourse(ctx, id);
+  }
+  if (
+    action === "assigndept" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    await study.assignCourseDepartment(id, Number(extra));
+    return showAdminCourse(ctx, id);
   }
   if (action === "ft" && Number.isSafeInteger(id)) {
     await study.toggleFolder(id);
@@ -1650,7 +2084,7 @@ async function routeAdminCallback(
       ctx,
       section(
         "اختيار فرقة للأرشفة",
-        "سيتم نسخ الفصول والمقررات والموارد، ثم إخفاء الفرقة الحالية من القائمة النشطة.",
+        "سيتم نسخ الترمات والمقررات والموارد، ثم إخفاء الفرقة الحالية من القائمة النشطة.",
       ),
       levelsKeyboard(levels, `adm:clone:${id}`, `adm:year:${id}`, "adm:home"),
     );
@@ -1679,7 +2113,7 @@ async function routeUploadCallback(
     const terms = await content.terms(id);
     return show(
       ctx,
-      section("رفع ملفات", "اختر الفصل الدراسي."),
+      section("رفع ملفات", "اختر الترم الدراسي."),
       termsKeyboard(terms, "up:t", "adm:upload", "adm:home"),
     );
   }
@@ -2147,7 +2581,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         const level = await content.level(state.parentId);
         return show(
           ctx,
-          section("تمت إضافة الفصل", title),
+          section("تمت إضافة الترم", displayTermTitle(title)),
           adminNavigation(
             level?.archive_year_id !== null &&
               level?.archive_year_id !== undefined
@@ -2156,16 +2590,35 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           ),
         );
       }
-      case "add-course":
+      case "add-department":
+        if (state.parentId === undefined)
+          throw new Error("Missing level for new department.");
+        await study.createDepartment(state.parentId, title);
+        await users.clearState(userId);
+        return showAdminDepartments(
+          ctx,
+          state.parentId,
+          `تمت إضافة القسم «${title}».`,
+        );
+      case "add-course": {
         if (state.parentId === undefined)
           throw new Error("Missing term for new course.");
-        await study.createCourse(state.parentId, title);
-        await users.clearState(userId);
-        return show(
-          ctx,
-          section("تمت إضافة المقرر", title),
-          adminNavigation(`adm:tm:${state.parentId}`),
+        await study.createCourse(
+          state.parentId,
+          title,
+          state.departmentId ?? null,
         );
+        await users.clearState(userId);
+        const department =
+          state.departmentId === null || state.departmentId === undefined
+            ? undefined
+            : await content.department(state.departmentId);
+        return showAdminTerm(
+          ctx,
+          state.parentId,
+          `تمت إضافة «${title}» إلى ${department ? `قسم ${department.title}` : "المواد المشتركة"}.`,
+        );
+      }
       case "add-folder":
         await study.createFolder(title);
         await users.clearState(userId);
@@ -2206,18 +2659,42 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       case "rename":
         if (
           !state.entityId ||
-          !["level", "term", "course", "folder"].includes(state.entity ?? "")
+          ![
+            "level",
+            "term",
+            "course",
+            "folder",
+            "department",
+          ].includes(state.entity ?? "")
         )
           throw new Error("Invalid rename target.");
         await study.rename(
-          state.entity as "level" | "term" | "course" | "folder",
+          state.entity as
+            | "level"
+            | "term"
+            | "course"
+            | "folder"
+            | "department",
           state.entityId,
           title,
         );
         await users.clearState(userId);
+        if (state.entity === "department") {
+          const department = await content.department(state.entityId);
+          if (department) {
+            return showAdminDepartments(
+              ctx,
+              department.level_id,
+              "تم تحديث اسم القسم.",
+            );
+          }
+        }
         return show(
           ctx,
-          section("تم تحديث الاسم", title),
+          section(
+            "تم تحديث الاسم",
+            state.entity === "term" ? displayTermTitle(title) : title,
+          ),
           adminNavigation("adm:home"),
         );
     }

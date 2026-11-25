@@ -2,6 +2,7 @@ import { db } from "../db/client.js";
 import type {
   ArchiveYear,
   Course,
+  Department,
   Folder,
   Level,
   Resource,
@@ -48,13 +49,16 @@ export class StudyRepository {
     >
   > {
     const result = await db.execute({
-      sql: `SELECT c.id, c.term_id, c.title, c.sort_order, c.active, l.title AS level_title,
+      sql: `SELECT c.id, c.term_id, c.department_id, c.title, c.sort_order, c.active,
+                   l.title AS level_title,
                    t.title AS term_title, a.title AS archive_title
             FROM courses c JOIN terms t ON t.id = c.term_id
             JOIN levels l ON l.id = t.level_id
             LEFT JOIN archive_years a ON a.id = l.archive_year_id
+            LEFT JOIN departments d ON d.id = c.department_id
             WHERE l.archive_year_id IS NULL AND l.is_archived = 0
               AND l.active = 1 AND t.active = 1 AND c.active = 1
+              AND (c.department_id IS NULL OR d.active = 1)
               AND c.title LIKE ?
             ORDER BY l.sort_order, t.sort_order, c.sort_order LIMIT 5`,
       args: [`%${keyword}%`],
@@ -77,6 +81,27 @@ export class StudyRepository {
     return result.rows as unknown as Term[];
   }
 
+  async departments(
+    levelId: number,
+    activeOnly = true,
+  ): Promise<Department[]> {
+    const result = await db.execute({
+      sql: `SELECT id, level_id, title, sort_order, active FROM departments
+            WHERE level_id = ? ${activeOnly ? "AND active = 1" : ""}
+            ORDER BY sort_order, id`,
+      args: [levelId],
+    });
+    return result.rows as unknown as Department[];
+  }
+
+  async department(id: number): Promise<Department | undefined> {
+    const result = await db.execute({
+      sql: "SELECT id, level_id, title, sort_order, active FROM departments WHERE id = ?",
+      args: [id],
+    });
+    return result.rows[0] as unknown as Department | undefined;
+  }
+
   async level(id: number): Promise<Level | undefined> {
     const result = await db.execute({
       sql: "SELECT id, title, sort_order, active, is_archived, archive_year_id FROM levels WHERE id = ?",
@@ -95,16 +120,33 @@ export class StudyRepository {
 
   async courses(termId: number, activeOnly = true): Promise<Course[]> {
     const result = await db.execute({
-      sql: `SELECT id, term_id, title, sort_order, active FROM courses
+      sql: `SELECT id, term_id, department_id, title, sort_order, active FROM courses
             WHERE term_id = ? ${activeOnly ? "AND active = 1" : ""} ORDER BY sort_order, id`,
       args: [termId],
     });
     return result.rows as unknown as Course[];
   }
 
+  async coursesForDepartment(
+    termId: number,
+    departmentId: number,
+    activeOnly = true,
+  ): Promise<Course[]> {
+    const result = await db.execute({
+      sql: `SELECT c.id, c.term_id, c.department_id, c.title, c.sort_order, c.active
+            FROM courses c
+            WHERE c.term_id = ?
+              AND c.department_id = ?
+              ${activeOnly ? "AND c.active = 1" : ""}
+            ORDER BY c.sort_order, c.id`,
+      args: [termId, departmentId],
+    });
+    return result.rows as unknown as Course[];
+  }
+
   async course(id: number): Promise<Course | undefined> {
     const result = await db.execute({
-      sql: "SELECT id, term_id, title, sort_order, active FROM courses WHERE id = ?",
+      sql: "SELECT id, term_id, department_id, title, sort_order, active FROM courses WHERE id = ?",
       args: [id],
     });
     return result.rows[0] as unknown as Course | undefined;
@@ -193,10 +235,27 @@ export class StudyRepository {
     return idOf(result.lastInsertRowid);
   }
 
-  async createCourse(termId: number, title: string): Promise<number> {
+  async createDepartment(levelId: number, title: string): Promise<number> {
     const result = await db.execute({
-      sql: "INSERT INTO courses (term_id, title, sort_order) VALUES (?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM courses WHERE term_id = ?), 0))",
-      args: [termId, title, termId],
+      sql: `INSERT INTO departments (level_id, title, sort_order)
+            VALUES (?, ?, COALESCE(
+              (SELECT MAX(sort_order) + 1 FROM departments WHERE level_id = ?), 0))`,
+      args: [levelId, title, levelId],
+    });
+    return idOf(result.lastInsertRowid);
+  }
+
+  async createCourse(
+    termId: number,
+    title: string,
+    departmentId: number | null,
+  ): Promise<number> {
+    const result = await db.execute({
+      sql: `INSERT INTO courses (term_id, department_id, title, sort_order)
+            VALUES (?, ?, ?, COALESCE(
+              (SELECT MAX(sort_order) + 1 FROM courses
+               WHERE term_id = ? AND department_id IS ?), 0))`,
+      args: [termId, departmentId, title, termId, departmentId],
     });
     return idOf(result.lastInsertRowid);
   }
@@ -210,7 +269,7 @@ export class StudyRepository {
   }
 
   async rename(
-    entity: "level" | "term" | "course" | "folder",
+    entity: "level" | "term" | "course" | "folder" | "department",
     id: number,
     title: string,
   ): Promise<void> {
@@ -219,6 +278,7 @@ export class StudyRepository {
       term: "terms",
       course: "courses",
       folder: "folders",
+      department: "departments",
     }[entity];
     await db.execute({
       sql: `UPDATE ${table} SET title = ? WHERE id = ?`,
@@ -264,11 +324,31 @@ export class StudyRepository {
     });
   }
 
+  async toggleDepartment(id: number): Promise<void> {
+    await db.execute({
+      sql: "UPDATE departments SET active = 1 - active WHERE id = ?",
+      args: [id],
+    });
+  }
+
   async toggleCourse(id: number): Promise<void> {
     await db.execute({
       sql: "UPDATE courses SET active = 1 - active WHERE id = ?",
       args: [id],
     });
+  }
+
+  async assignCourseDepartment(
+    courseId: number,
+    departmentId: number | null,
+  ): Promise<void> {
+    const result = await db.execute({
+      sql: "UPDATE courses SET department_id = ? WHERE id = ?",
+      args: [departmentId, courseId],
+    });
+    if (Number(result.rowsAffected) === 0) {
+      throw new Error("The selected course no longer exists.");
+    }
   }
 
   async toggleFolder(id: number): Promise<void> {
@@ -349,6 +429,23 @@ export class StudyRepository {
         args: [sourceTitle, archiveYearId],
       });
       const newLevelId = idOf(newLevel.lastInsertRowid);
+      const sourceDepartments = await tx.execute({
+        sql: "SELECT id, title, sort_order FROM departments WHERE level_id = ?",
+        args: [levelId],
+      });
+      const departmentIds = new Map<number, number>();
+      for (const department of sourceDepartments.rows as unknown as Array<{
+        id: number;
+        title: string;
+        sort_order: number;
+      }>) {
+        const inserted = await tx.execute({
+          sql: `INSERT INTO departments (level_id, title, sort_order, active)
+                VALUES (?, ?, ?, 1)`,
+          args: [newLevelId, department.title, department.sort_order],
+        });
+        departmentIds.set(department.id, idOf(inserted.lastInsertRowid));
+      }
       const terms = await tx.execute({
         sql: "SELECT id, title, sort_order FROM terms WHERE level_id = ?",
         args: [levelId],
@@ -364,17 +461,29 @@ export class StudyRepository {
         });
         const newTermId = idOf(newTerm.lastInsertRowid);
         const courses = await tx.execute({
-          sql: "SELECT id, title, sort_order FROM courses WHERE term_id = ?",
+          sql: "SELECT id, department_id, title, sort_order FROM courses WHERE term_id = ?",
           args: [term.id],
         });
         for (const course of courses.rows as unknown as Array<{
           id: number;
+          department_id: number | null;
           title: string;
           sort_order: number;
         }>) {
+          const departmentId =
+            course.department_id === null
+              ? null
+              : (departmentIds.get(course.department_id) ?? null);
           const newCourse = await tx.execute({
-            sql: "INSERT INTO courses (term_id, title, sort_order, active) VALUES (?, ?, ?, 1)",
-            args: [newTermId, course.title, course.sort_order],
+            sql: `INSERT INTO courses
+                    (term_id, department_id, title, sort_order, active)
+                  VALUES (?, ?, ?, ?, 1)`,
+            args: [
+              newTermId,
+              departmentId,
+              course.title,
+              course.sort_order,
+            ],
           });
           const oldCourseId = course.id;
           const newCourseId = idOf(newCourse.lastInsertRowid);
@@ -624,8 +733,10 @@ export class StudyRepository {
             JOIN courses c ON c.id = g.course_id
             JOIN terms t ON t.id = c.term_id
             JOIN levels l ON l.id = t.level_id
+            LEFT JOIN departments d ON d.id = c.department_id
             WHERE l.archive_year_id IS NULL AND l.is_archived = 0 AND l.active = 1
               AND t.active = 1 AND c.active = 1
+              AND (c.department_id IS NULL OR d.active = 1)
               AND (g.title LIKE ? OR r.file_name LIKE ? OR r.part_label LIKE ? OR c.title LIKE ?)
             GROUP BY g.id
             ORDER BY g.sort_order DESC, g.id DESC LIMIT 10`,

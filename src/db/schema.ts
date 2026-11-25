@@ -34,9 +34,18 @@ CREATE TABLE IF NOT EXISTS terms (
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS departments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  level_id INTEGER NOT NULL REFERENCES levels(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS courses (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   term_id INTEGER NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+  department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
   title TEXT NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1
@@ -86,6 +95,8 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE INDEX IF NOT EXISTS idx_levels_archive ON levels(archive_year_id, active, sort_order);
 CREATE INDEX IF NOT EXISTS idx_terms_level ON terms(level_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_courses_term ON courses(term_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_courses_term_department ON courses(term_id, department_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_departments_level ON departments(level_id, active, sort_order, id);
 CREATE INDEX IF NOT EXISTS idx_resources_course_folder ON resources(course_id, folder_id);
 CREATE INDEX IF NOT EXISTS idx_resources_search ON resources(title, file_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON user_sessions(expires_at);

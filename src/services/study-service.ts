@@ -24,11 +24,32 @@ export class StudyService {
     return this.content.createTerm(levelId, title.trim());
   }
 
-  async createCourse(termId: number, title: string): Promise<number> {
+  async createDepartment(levelId: number, title: string): Promise<number> {
     this.validateTitle(title);
-    if (!(await this.content.term(termId)))
+    if (!(await this.content.level(levelId))) {
+      throw new Error("The selected level does not exist.");
+    }
+    return this.content.createDepartment(levelId, title.trim());
+  }
+
+  async createCourse(
+    termId: number,
+    title: string,
+    departmentId: number | null = null,
+  ): Promise<number> {
+    this.validateTitle(title);
+    const term = await this.content.term(termId);
+    if (!term)
       throw new Error("The selected term does not exist.");
-    return this.content.createCourse(termId, title.trim());
+    if (departmentId !== null) {
+      const department = await this.content.department(departmentId);
+      if (!department || department.level_id !== term.level_id) {
+        throw new Error(
+          "The selected department must belong to the course's level.",
+        );
+      }
+    }
+    return this.content.createCourse(termId, title.trim(), departmentId);
   }
 
   async createFolder(title: string): Promise<number> {
@@ -42,7 +63,7 @@ export class StudyService {
   }
 
   async rename(
-    entity: "level" | "term" | "course" | "folder",
+    entity: "level" | "term" | "course" | "folder" | "department",
     id: number,
     title: string,
   ): Promise<void> {
@@ -78,6 +99,33 @@ export class StudyService {
     if (!(await this.content.term(id)))
       throw new Error("The selected term does not exist.");
     await this.content.toggleTerm(id);
+  }
+
+  async toggleDepartment(id: number): Promise<void> {
+    if (!(await this.content.department(id))) {
+      throw new Error("The selected department does not exist.");
+    }
+    await this.content.toggleDepartment(id);
+  }
+
+  async assignCourseDepartment(
+    courseId: number,
+    departmentId: number | null,
+  ): Promise<void> {
+    const course = await this.content.course(courseId);
+    const term = course ? await this.content.term(course.term_id) : undefined;
+    if (!course || !term) {
+      throw new Error("The selected course does not exist.");
+    }
+    if (departmentId !== null) {
+      const department = await this.content.department(departmentId);
+      if (!department || department.level_id !== term.level_id) {
+        throw new Error(
+          "The selected department must belong to the course's level.",
+        );
+      }
+    }
+    await this.content.assignCourseDepartment(courseId, departmentId);
   }
 
   async toggleCourse(id: number): Promise<void> {

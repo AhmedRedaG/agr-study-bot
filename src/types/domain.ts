@@ -15,9 +15,18 @@ export interface Term {
   active: number;
 }
 
+export interface Department {
+  id: number;
+  level_id: number;
+  title: string;
+  sort_order: number;
+  active: number;
+}
+
 export interface Course {
   id: number;
   term_id: number;
+  department_id: number | null;
   title: string;
   sort_order: number;
   active: number;
@@ -70,6 +79,7 @@ export type AdminState =
       action:
         | "add-level"
         | "add-term"
+        | "add-department"
         | "add-course"
         | "add-folder"
         | "rename-resource-group"
@@ -80,6 +90,7 @@ export type AdminState =
       entity?: string;
       entityId?: number;
       archiveYearId?: number;
+      departmentId?: number | null;
       resourceGroupId?: number;
       resourcePage?: number;
       partPage?: number;

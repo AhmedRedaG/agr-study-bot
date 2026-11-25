@@ -12,6 +12,10 @@ export const labels = {
   back: "رجوع",
 };
 
+export function displayTermTitle(title: string): string {
+  return title.replaceAll("الفصل", "الترم").replaceAll("فصل", "ترم");
+}
+
 export type MainMenuCallback = "nav:home" | "adm:home";
 
 export function withNavigation(
@@ -66,12 +70,12 @@ export function termsKeyboard(
   back: string,
   mainMenuCallback: MainMenuCallback = "nav:home",
 ): InlineKeyboard {
-  return listKeyboard(
-    terms,
-    (term) => `${callbackPrefix}:${term.id}`,
-    back,
-    mainMenuCallback,
-  );
+  const keyboard = new InlineKeyboard();
+  for (const term of terms)
+    keyboard
+      .text(displayTermTitle(term.title), `${callbackPrefix}:${term.id}`)
+      .row();
+  return withNavigation(keyboard, back, mainMenuCallback);
 }
 
 export function coursesKeyboard(
