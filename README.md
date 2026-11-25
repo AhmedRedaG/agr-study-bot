@@ -33,7 +33,11 @@ Copy `.env.example` to `.env` for local work and fill in:
 | `ARCHIVE_CHANNEL_ID`        | No                     | Optional private channel for upload metadata and a backup copy        |
 | `REQUIRED_CHANNEL_ID`       | No                     | Channel ID/username used for optional force-subscribe verification    |
 | `REQUIRED_CHANNEL_USERNAME` | No                     | Public channel username used to build the join button                 |
-| `SUPPORT_CONTACT`           | No                     | Contact handle, email, or support URL shown in Contact Us             |
+| `SUPPORT_CONTACT`           | No                     | Fallback contact handle, email, URL, or text                           |
+| `SUPPORT_TELEGRAM`          | No                     | Support Telegram username (`@name`) or `https://t.me/...` URL           |
+| `SUPPORT_EMAIL`             | No                     | Support email shown with a one-tap copy button                         |
+| `SUPPORT_URL`               | No                     | HTTP(S) link to a support or feedback form                             |
+| `OFFICIAL_CHANNEL_URL`      | No                     | HTTP(S) link to the official Telegram channel                          |
 | `BROADCAST_DELAY_MS`        | No                     | Delay between broadcast recipients; defaults to 45 ms (minimum 35 ms) |
 
 Keep tokens out of source control. The bot needs administrator access to the required channel to reliably verify membership. For upload backups, grant the bot permission to post in the archive channel.
@@ -78,7 +82,7 @@ Check webhook health with Telegram's `getWebhookInfo` API method. To switch back
 - Use **إدارة الملفات** in `/admin` to browse resources by level, term, course, and folder. Admins can rename a resource or part, append files or links, replace a file while retaining its position/title, and delete either a part or an entire resource after confirmation. Student folders show paginated resource titles; selecting a multi-part title delivers its files and links in order without repeating the parent title or adding automatic part counters.
 - Broadcast text or media to all known users or users who selected a specific level/term. Delivery is paced in a Vercel background task so the webhook can acknowledge Telegram promptly; blocked users are marked, and the admin receives delivered/blocked/failed counts when the send completes. The function timeout is configured to 300 seconds, subject to the limits of your Vercel plan.
 
-Students can browse active and archived content, search current resources, set a preferred level and term, read About/Contact information, and send a message or suggestion to admins. In admin views, **القائمة الرئيسية** always returns to the admin dashboard; **واجهة الطالب / Start** is the dedicated action for opening the student menu. Empty menus have an explicit next-step message rather than failing.
+Students can browse active and archived content, search current resources, set a preferred level and term, read the formatted About/Contact pages, and send suggestions or resource reports to admins. The home screen greets the student and offers a quick shortcut when a valid saved level/term exists. In admin views, **القائمة الرئيسية** always returns to the admin dashboard; **واجهة الطالب / Start** is the dedicated action for opening the student menu. Empty menus have an explicit next-step message rather than failing.
 
 ## Database notes
 

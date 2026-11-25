@@ -99,7 +99,10 @@ export type AdminState =
   | { kind: "search" }
   | { kind: "my-level" }
   | { kind: "my-term"; levelId: number }
-  | { kind: "feedback" }
+  | {
+      kind: "feedback";
+      category: "suggestion" | "resource" | "other";
+    }
   | {
       kind: "upload-title";
       courseId: number;

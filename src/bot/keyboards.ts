@@ -39,14 +39,25 @@ export function listKeyboard<T extends { id: number; title: string }>(
   return withNavigation(keyboard, back, mainMenuCallback);
 }
 
-export function mainMenu(levels: Level[]): InlineKeyboard {
+export function mainMenu(
+  levels: Level[],
+  quickAccess?: { callback: string },
+): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const level of levels)
     keyboard.text(level.title, `nav:l:${level.id}`).row();
-  keyboard.text("السنين السابقة", "nav:archives").row();
-  keyboard.text("بحث", "nav:search").text("فرقتي الحالية", "nav:my").row();
-  keyboard.text("نبذة عن AGR Study", "nav:about").row();
-  keyboard.text("تواصل معنا", "nav:contact").row();
+  if (quickAccess) {
+    keyboard.text("⚡ متابعة دراستي", quickAccess.callback).row();
+  }
+  keyboard
+    .text("🕰 السنين السابقة", "nav:archives")
+    .row()
+    .text("🔎 بحث", "nav:search")
+    .text("🎓 فرقتي الحالية", "nav:my")
+    .row()
+    .text("ℹ️ نبذة عننا", "nav:about")
+    .text("💬 تواصل معنا", "nav:contact")
+    .row();
   return keyboard;
 }
 

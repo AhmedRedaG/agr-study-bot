@@ -1,7 +1,7 @@
 import { webhookCallback } from "grammy";
 import { waitUntil } from "@vercel/functions";
 import { env } from "../src/config/env.js";
-import { bot } from "../src/bot/index.js";
+import { bot, registerBotCommands } from "../src/bot/index.js";
 import { ensureSchema } from "../src/db/schema.js";
 import { withBackgroundScheduler } from "../src/services/background-tasks.js";
 
@@ -21,5 +21,6 @@ export default async function webhook(request: Request): Promise<Response> {
     return new Response("Unauthorized", { status: 401 });
   }
   await ensureSchema();
+  await registerBotCommands();
   return withBackgroundScheduler(waitUntil, () => handleUpdate(request));
 }

@@ -30,6 +30,7 @@ async function show(
   ctx: Context,
   text: string,
   keyboard: InlineKeyboard,
+  parseMode?: "HTML",
 ): Promise<void> {
   for (const row of keyboard.inline_keyboard) {
     for (const button of row) {
@@ -41,21 +42,38 @@ async function show(
       }
     }
   }
+  const options = {
+    reply_markup: keyboard,
+    ...(parseMode ? { parse_mode: parseMode } : {}),
+  };
   if (ctx.callbackQuery?.message) {
     try {
-      await ctx.editMessageText(text, { reply_markup: keyboard });
+      await ctx.editMessageText(text, options);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.toLowerCase().includes("message is not modified"))
         throw error;
     }
   } else {
-    await ctx.reply(text, { reply_markup: keyboard });
+    await ctx.reply(text, options);
   }
 }
 
 function section(title: string, detail?: string): string {
-  return `AGR Study\n━━━━━━━━━━━━━━\n${title}${detail ? `\n\n${detail}` : ""}`;
+  return `AGR Study\n━━━━━━━\n${title}${detail ? `\n\n${detail}` : ""}`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function htmlSection(title: string, body: string): string {
+  return `<b>AGR Study</b>\n━━━━━━━\n<b>${escapeHtml(title)}</b>\n\n${body}`;
 }
 
 function buttonLabel(label: string): string {
@@ -81,10 +99,186 @@ async function sendHome(ctx: Context): Promise<void> {
   const from = ctx.from;
   if (from) await users.clearState(from.id);
   const levels = await content.currentLevels();
-  const detail = levels.length
-    ? "اختر الفرقة لبدء التصفح، أو استخدم البحث للوصول إلى مادة أو ملف بسرعة."
-    : "المحتوى الأكاديمي قيد الإعداد. يمكنك استكشاف الأرشيف أو معلومات المنصة والتواصل مع الإدارة.";
-  await show(ctx, section("منصة الموارد الأكاديمية", detail), mainMenu(levels));
+  let quickAccess: { callback: string; status: string } | undefined;
+  if (from) {
+    const preferred = await users.preferredLevel(from.id);
+    if (preferred) {
+      const level = await content.level(preferred.levelId);
+      const term =
+        preferred.termId === null
+          ? undefined
+          : await content.term(preferred.termId);
+      const validLevel =
+        level?.active && !level.is_archived && level.archive_year_id === null;
+      const validTerm =
+        preferred.termId === null ||
+        (term?.active && term.level_id === level?.id);
+      if (validLevel && validTerm) {
+        quickAccess = {
+          callback: term ? `nav:t:${term.id}` : `nav:l:${level.id}`,
+          status: term
+            ? `${level.title} · ${displayTermTitle(term.title)}`
+            : level.title,
+        };
+      }
+    }
+  }
+  const greeting = from?.first_name
+    ? `👋 أهلًا <b>${escapeHtml(from.first_name)}</b>`
+    : "👋 أهلًا بك";
+  const status = quickAccess
+    ? `<blockquote><b>اختيارك المحفوظ</b>\n${escapeHtml(quickAccess.status)}</blockquote>`
+    : "";
+  const detail = quickAccess
+    ? "اختر متابعة دراستي لاستكمال رحلة التعلّم، أو استخدم البحث للوصول إلى مقرر أو مورد بسرعة."
+    : "اختر فرقتك لبدء رحلة التعلّم، أو استخدم البحث للوصول إلى مقرر أو مورد بسرعة.";
+  const body = [
+    greeting,
+    status,
+    `<i>${detail}</i>`,
+    "<code>الفرقة ← الترم ← المقرر ← المحتوى</code>",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  await show(
+    ctx,
+    htmlSection("مساحتك الدراسية", body),
+    mainMenu(
+      levels,
+      quickAccess ? { callback: quickAccess.callback } : undefined,
+    ),
+    "HTML",
+  );
+}
+
+function contactHttpUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function supportEmail(): string | undefined {
+  if (env.supportEmail) return env.supportEmail;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.supportContact)
+    ? env.supportContact
+    : undefined;
+}
+
+async function showAbout(ctx: Context): Promise<void> {
+  const body = [
+    "إحنا تيم تطوعي هدفنا نساعد زملائنا والأجيال اللي بعدنا، من خلال إننا نجمع كل اللي ممكن نحتاجه خلال رحلتنا الدراسية في مكان واحد، بشكل منظم وسهل الوصول، وبواجهة راقية تليق بينا كلنا.",
+    "<b>تعلّمك، مرتب في مكان واحد</b>",
+    "<blockquote>📚 كتب ومراجع\n🎓 محاضرات وسكاشن\n📝 ملخصات وامتحانات سابقة\n🗂 موارد متعددة الأجزاء وروابط مفيدة\n🕰 أرشيف السنوات الدراسية</blockquote>",
+    "<b>ابدأ في ثوانٍ</b>",
+    "<code>الفرقة ← الترم ← القسم أو المقرر ← المحتوى</code>",
+    "استخدم <b>بحث</b> للوصول السريع، أو احفظ اختيارك في <b>فرقتي الحالية</b> لفتحه مباشرة من القائمة.",
+    `<i>AGR Study Bot on Telegram · Version ${escapeHtml(env.appVersion)}</i>`,
+  ].join("\n\n");
+  await show(
+    ctx,
+    htmlSection("نبذة عننا", body),
+    navigation("nav:home"),
+    "HTML",
+  );
+}
+
+async function showContact(ctx: Context): Promise<void> {
+  if (ctx.from) await users.clearState(ctx.from.id);
+  const keyboard = new InlineKeyboard();
+  const contactUrl = env.supportUrl ?? contactHttpUrl(env.supportContact);
+  const email = supportEmail();
+  const contactHandle = env.supportTelegramUrl;
+  const lines: string[] = [];
+
+  if (contactHandle) {
+    keyboard.url("💬 مراسلة الدعم", contactHandle).row();
+    lines.push("للاستفسارات العامة، راسل فريق الدعم مباشرة.");
+  }
+  if (contactUrl) {
+    keyboard.url("🌐 الفريق التقني", contactUrl).row();
+    // lines.push("يمكنك أيضًا إرسال طلب عبر نموذج التواصل.");
+  }
+  if (email) {
+    keyboard.copyText("نسخ البريد", email).row();
+    lines.push(`البريد الإلكتروني: <code>${escapeHtml(email)}</code>`);
+  }
+  if (env.officialChannelUrl) {
+    keyboard.url("📢 القناة الرسمية", env.officialChannelUrl).row();
+    lines.push("تابع القناة الرسمية للأخبار والتحديثات.");
+  }
+  if (!lines.length) {
+    lines.push(`<i>${escapeHtml(env.supportContact)}</i>`);
+  }
+
+  keyboard
+    .text("💡 إرسال اقتراح", "nav:feedback:suggestion")
+    .text("🛠 الإبلاغ عن مورد", "nav:feedback:resource")
+    .row()
+    .text("✍️ ملاحظات أخرى", "nav:feedback:other")
+    .row();
+  withNavigation(keyboard, "nav:home");
+  await show(
+    ctx,
+    htmlSection(
+      "تواصل معنا",
+      [
+        "<b>نحن هنا للمساعدة</b>",
+        ...lines,
+        "<b>أرسل اقتراحًا أو بلّغ عن مورد مفقود أو رابط معطّل، وسنراجعه.</b>",
+      ].join("\n\n"),
+    ),
+    keyboard,
+    "HTML",
+  );
+}
+
+async function showFeedbackOptions(ctx: Context): Promise<void> {
+  if (ctx.from) await users.clearState(ctx.from.id);
+  const keyboard = new InlineKeyboard()
+    .text("💡 اقتراح جديد", "nav:feedback:suggestion")
+    .row()
+    .text("🛠 مورد مفقود أو رابط معطّل", "nav:feedback:resource")
+    .row()
+    .text("✍️ ملاحظات أخرى", "nav:feedback:other")
+    .row();
+  withNavigation(keyboard, "nav:contact");
+  await show(
+    ctx,
+    htmlSection(
+      "كيف يمكننا مساعدتك؟",
+      "اختر نوع الرسالة، ثم اكتب التفاصيل أو أرفق صورة توضح المشكلة.",
+    ),
+    keyboard,
+    "HTML",
+  );
+}
+
+async function startFeedback(
+  ctx: Context,
+  category: "suggestion" | "resource" | "other",
+): Promise<void> {
+  if (ctx.from)
+    await users.setState(ctx.from.id, { kind: "feedback", category });
+  const instructions = {
+    suggestion: "اكتب اقتراحك لتحسين AGR Study.",
+    resource:
+      "اذكر اسم الفرقة والترم والمقرر والمجلد، واشرح المشكلة أو أرسل الرابط المعطّل.",
+    other: "أرسل ملاحظتك أو استفسارك إلى فريق المنصة.",
+  }[category];
+  await show(
+    ctx,
+    htmlSection(
+      category === "resource" ? "الإبلاغ عن مورد" : "رسالة لفريق المنصة",
+      `${escapeHtml(instructions)}\n\n<blockquote>يمكنك إرسال نص أو صورة أو مستند. سيصل البلاغ إلى فريق الإدارة.</blockquote>`,
+    ),
+    navigation("nav:contact"),
+    "HTML",
+  );
 }
 
 async function ensureSubscribed(ctx: Context): Promise<boolean> {
@@ -145,6 +339,10 @@ bot.use(async (ctx, next) => {
 });
 
 bot.command("start", async (ctx) => {
+  await sendHome(ctx);
+});
+
+bot.command("help", async (ctx) => {
   await sendHome(ctx);
 });
 
@@ -266,7 +464,9 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     const allDepartments = level
       ? await content.departments(level.id, false)
       : [];
-    const departments = allDepartments.filter((department) => department.active);
+    const departments = allDepartments.filter(
+      (department) => department.active,
+    );
     const back =
       level?.archive_year_id === null
         ? `nav:l:${term.level_id}`
@@ -356,10 +556,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     if (!term?.active || !level?.active) return sendHome(ctx);
     if (course.department_id !== null) {
       const department = await content.department(course.department_id);
-      if (
-        !department?.active ||
-        department.level_id !== term.level_id
-      ) {
+      if (!department?.active || department.level_id !== term.level_id) {
         return sendHome(ctx);
       }
     }
@@ -585,39 +782,15 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
     );
   }
   if (data === "nav:about") {
-    return show(
-      ctx,
-      section(
-        "نبذة عن AGR Study",
-        "منصة تعليمية منظمة للوصول إلى الكتب والمحاضرات والسكاشن والملخصات والامتحانات السابقة وأرشيف السنوات.\n\nابدأ باختيار الفرقة ثم الترم؛ ستظهر المواد المشتركة والأقسام المتاحة، وبعدها اختر المقرر ونوع المحتوى. يمكنك أيضًا استخدام البحث للوصول السريع.\n\nالإصدار: " +
-          env.appVersion +
-          "\nالحالة: تعمل الخدمة عبر Telegram.",
-      ),
-      navigation("nav:home"),
-    );
+    return showAbout(ctx);
   }
-  if (data === "nav:contact") {
-    const keyboard = navigation("nav:home");
-    keyboard.row().text("✍️ إرسال رسالة أو اقتراح", "nav:feedback");
-    return show(
-      ctx,
-      section(
-        "تواصل معنا",
-        `للدعم والاستفسارات:\n${env.supportContact}\n\nيمكنك أيضًا إرسال رسالة مباشرة لفريق المنصة.`,
-      ),
-      keyboard,
-    );
-  }
-  if (data === "nav:feedback") {
-    if (ctx.from) await users.setState(ctx.from.id, { kind: "feedback" });
-    return show(
-      ctx,
-      section(
-        "رسالة لفريق المنصة",
-        "أرسل رسالتك أو اقتراحك الآن. يدعم البوت النصوص والصور والملفات.",
-      ),
-      navigation("nav:contact"),
-    );
+  if (data === "nav:contact") return showContact(ctx);
+  if (data === "nav:feedback") return showFeedbackOptions(ctx);
+  if (area === "nav" && action === "feedback") {
+    if (rawId === "suggestion" || rawId === "resource" || rawId === "other") {
+      return startFeedback(ctx, rawId);
+    }
+    return showFeedbackOptions(ctx);
   }
 
   if (data.startsWith("adm:")) {
@@ -666,8 +839,7 @@ async function sendResource(
     if (!resource.url) {
       throw new Error(`Link resource ${resource.id} has no URL.`);
     }
-    const title =
-      captionLines[0] ?? (showGroupTitle ? groupTitle : "رابط");
+    const title = captionLines[0] ?? (showGroupTitle ? groupTitle : "رابط");
     const keyboard = new InlineKeyboard().url("فتح الرابط", resource.url);
     await ctx.reply(title, { reply_markup: keyboard });
     return;
@@ -742,14 +914,11 @@ async function sendResourceGroup(
   for (const resource of parts) {
     await sendResource(ctx, resource, group.title, parts.length === 1);
   }
-  await ctx.reply(
-    "يمكنك متابعة التصفح من هنا:",
-    {
-      reply_markup: navigation(
-        `nav:f:${group.course_id}:${group.folder_id}:${page}`,
-      ),
-    },
-  );
+  await ctx.reply("يمكنك متابعة التصفح من هنا:", {
+    reply_markup: navigation(
+      `nav:f:${group.course_id}:${group.folder_id}:${page}`,
+    ),
+  });
 }
 
 async function showAdmin(ctx: Context): Promise<void> {
@@ -1284,9 +1453,7 @@ async function showAdminLevel(ctx: Context, levelId: number): Promise<void> {
       .row();
     keyboard.text("✏️ إعادة تسمية الترم", `adm:rename:term:${term.id}`).row();
   }
-  keyboard
-    .text("🏛️ إدارة الأقسام", `adm:departments:${levelId}`)
-    .row();
+  keyboard.text("🏛️ إدارة الأقسام", `adm:departments:${levelId}`).row();
   keyboard.text("✏️ إعادة تسمية الفرقة", `adm:rename:level:${levelId}`).row();
   const back =
     level.archive_year_id === null
@@ -1335,9 +1502,7 @@ async function showAdminDepartments(
   }
   withNavigation(
     keyboard,
-    level.archive_year_id === null
-      ? `adm:lv:${levelId}`
-      : `adm:alv:${levelId}`,
+    level.archive_year_id === null ? `adm:lv:${levelId}` : `adm:alv:${levelId}`,
     "adm:home",
   );
   await show(
@@ -1420,10 +1585,7 @@ async function showAdminDepartmentTerms(
   );
 }
 
-async function showAddCourseScope(
-  ctx: Context,
-  termId: number,
-): Promise<void> {
+async function showAddCourseScope(ctx: Context, termId: number): Promise<void> {
   const term = await content.term(termId);
   const level = term ? await content.level(term.level_id) : undefined;
   if (!term || !level) return showAdminLevels(ctx);
@@ -1462,9 +1624,7 @@ async function promptAddCourse(
   const term = await content.term(termId);
   if (!term) return showAdminLevels(ctx);
   const department =
-    departmentId === null
-      ? undefined
-      : await content.department(departmentId);
+    departmentId === null ? undefined : await content.department(departmentId);
   if (
     departmentId !== null &&
     (!department || department.level_id !== term.level_id)
@@ -1542,10 +1702,7 @@ async function showAdminTerm(
     ctx,
     section(
       `إدارة ${displayTermTitle(term.title)}`,
-      [
-        notice,
-        courses.length ? "اختر مقررًا لإدارته." : "لا توجد مقررات بعد.",
-      ]
+      [notice, courses.length ? "اختر مقررًا لإدارته." : "لا توجد مقررات بعد."]
         .filter(Boolean)
         .join("\n\n"),
     ),
@@ -1921,12 +2078,7 @@ async function routeAdminCallback(
     ["level", "term", "course", "folder", "department"].includes(raw ?? "") &&
     Number.isSafeInteger(Number(extra))
   ) {
-    const entity = raw as
-      | "level"
-      | "term"
-      | "course"
-      | "folder"
-      | "department";
+    const entity = raw as "level" | "term" | "course" | "folder" | "department";
     if (ctx.from)
       await users.setState(ctx.from.id, {
         kind: "text",
@@ -1972,8 +2124,8 @@ async function routeAdminCallback(
     const current =
       course.department_id === null
         ? "🔗 مواد مشتركة"
-        : (await content.department(course.department_id))?.title ??
-          "قسم غير موجود";
+        : ((await content.department(course.department_id))?.title ??
+          "قسم غير موجود");
     const keyboard = new InlineKeyboard()
       .text(
         `${course.department_id === null ? "✓ " : ""}🔗 مواد مشتركة`,
@@ -1993,9 +2145,7 @@ async function routeAdminCallback(
     const level = await content.level(term.level_id);
     withNavigation(
       keyboard,
-      level?.is_archived
-        ? `adm:acr:${course.id}`
-        : `adm:cr:${course.id}`,
+      level?.is_archived ? `adm:acr:${course.id}` : `adm:cr:${course.id}`,
       "adm:home",
     );
     return show(
@@ -2364,7 +2514,10 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     }
     return show(
       ctx,
-      section("اكتملت إضافة الموارد", `تم حفظ ${state.uploadedCount ?? 0} موردًا.`),
+      section(
+        "اكتملت إضافة الموارد",
+        `تم حفظ ${state.uploadedCount ?? 0} موردًا.`,
+      ),
       adminNavigation("adm:home"),
     );
   }
@@ -2481,6 +2634,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           env.archiveChannelId,
           [
             "AGR Study resource",
+            `Resource Title: ${state.groupTitle ?? file?.fileName ?? "رابط جديد"}`,
             `Course ID: ${state.courseId}`,
             `Folder ID: ${state.folderId}`,
             `Group ID: ${groupId}`,
@@ -2530,16 +2684,58 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     return;
   }
   if (state.kind === "feedback") {
+    const category = state.category ?? "other";
+    const categoryLabels = {
+      suggestion: "اقتراح جديد",
+      resource: "بلاغ عن مورد مفقود أو معطّل",
+      other: "ملاحظة أو استفسار",
+    };
+    const submittedText =
+      message.text?.trim() ||
+      message.caption?.trim() ||
+      "أرفق الطالب ملفًا أو صورة مع البلاغ.";
+    const notification = [
+      "<b>📩 رسالة جديدة إلى دعم AGR Study</b>",
+      `🏷 <b>النوع:</b> ${categoryLabels[category]}`,
+      `👤 <b>من:</b> ${escapeHtml(message.from.first_name)} · <code>${userId}</code>`,
+      message.from.username
+        ? `🔗 <b>المعرّف:</b> @${escapeHtml(message.from.username)}`
+        : undefined,
+      "",
+      `<blockquote>${escapeHtml(submittedText.slice(0, 2500))}</blockquote>`,
+    ]
+      .filter((line) => line !== undefined)
+      .join("\n");
+    let delivered = 0;
     for (const adminId of env.adminIds) {
-      await ctx.api.sendMessage(
-        adminId,
-        `رسالة دعم جديدة من ${message.from.first_name} (ID: ${userId})${message.from.username ? ` @${message.from.username}` : ""}`,
+      try {
+        await ctx.api.sendMessage(adminId, notification, {
+          parse_mode: "HTML",
+        });
+        if (!message.text) {
+          await ctx.api.copyMessage(
+            adminId,
+            message.chat.id,
+            message.message_id,
+          );
+        }
+        delivered += 1;
+      } catch (error) {
+        console.error(
+          `Could not deliver student feedback to admin ${adminId}:`,
+          error,
+        );
+      }
+    }
+    if (delivered === 0) {
+      await ctx.reply(
+        "تعذر إيصال رسالتك إلى الإدارة الآن. حاول مرة أخرى أو استخدم /cancel.",
       );
-      await ctx.api.copyMessage(adminId, message.chat.id, message.message_id);
+      return;
     }
     await users.clearState(userId);
     await ctx.reply(
-      "وصلت رسالتك إلى فريق AGR Study. شكرًا لمساعدتنا على التطوير.",
+      `وصل ${categoryLabels[category]} إلى فريق AGR Study. شكرًا لمساهمتك.`,
       {
         reply_markup: isAdmin(userId)
           ? adminNavigation("adm:home")
@@ -2699,22 +2895,13 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       case "rename":
         if (
           !state.entityId ||
-          ![
-            "level",
-            "term",
-            "course",
-            "folder",
-            "department",
-          ].includes(state.entity ?? "")
+          !["level", "term", "course", "folder", "department"].includes(
+            state.entity ?? "",
+          )
         )
           throw new Error("Invalid rename target.");
         await study.rename(
-          state.entity as
-            | "level"
-            | "term"
-            | "course"
-            | "folder"
-            | "department",
+          state.entity as "level" | "term" | "course" | "folder" | "department",
           state.entityId,
           title,
         );
@@ -2808,5 +2995,23 @@ bot.catch((error) => {
       });
   }
 });
+
+let commandsRegistration: Promise<void> | undefined;
+
+export function registerBotCommands(): Promise<void> {
+  commandsRegistration ??= bot.api
+    .setMyCommands([
+      { command: "start", description: "فتح القائمة الرئيسية" },
+      { command: "admin", description: "لوحة الإدارة للمصرح لهم" },
+      // { command: "help", description: "عرض القائمة والإرشادات" },
+      // { command: "cancel", description: "إلغاء العملية الحالية" },
+    ])
+    .then(() => undefined)
+    .catch((error: unknown) => {
+      commandsRegistration = undefined;
+      throw error;
+    });
+  return commandsRegistration;
+}
 
 export { bot };
