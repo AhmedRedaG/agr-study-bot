@@ -434,7 +434,7 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
         folder?.title ?? "المحتوى",
         total
           ? `الموارد: ${total} · الصفحة ${safePage + 1} من ${pageCount}`
-          : "لا توجد ملفات هنا بعد. ستظهر المواد الجديدة هنا عند إضافتها.",
+          : "لا توجد موارد هنا بعد. ستظهر الملفات والروابط الجديدة هنا.",
       ),
       keyboard,
     );
@@ -654,24 +654,28 @@ async function sendResource(
   ctx: Context,
   resource: Resource,
   groupTitle: string,
-  partIndex: number,
-  totalParts: number,
+  showGroupTitle: boolean,
 ): Promise<void> {
-  const partName =
-    totalParts > 1
-      ? (resource.part_label ?? `الجزء ${partIndex + 1} من ${totalParts}`)
-      : resource.part_label;
-  const caption = [
-    groupTitle,
-    partName,
-    resource.caption !== groupTitle && resource.caption !== partName
-      ? resource.caption
-      : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .slice(0, 1000);
-  const options = { caption };
+  const captionLines = [resource.part_label, resource.caption]
+    .flatMap((value) => value?.split(/\r?\n/) ?? [])
+    .map((value) => value.trim())
+    .filter((value) => value && value !== groupTitle)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const caption = captionLines.join("\n").slice(0, 1000);
+  if (resource.file_type === "link") {
+    if (!resource.url) {
+      throw new Error(`Link resource ${resource.id} has no URL.`);
+    }
+    const title =
+      captionLines[0] ?? (showGroupTitle ? groupTitle : "رابط");
+    const keyboard = new InlineKeyboard().url("فتح الرابط", resource.url);
+    await ctx.reply(title, { reply_markup: keyboard });
+    return;
+  }
+  if (!resource.file_id) {
+    throw new Error(`File resource ${resource.id} has no Telegram file ID.`);
+  }
+  const options = caption ? { caption } : {};
   switch (resource.file_type) {
     case "photo":
       await ctx.replyWithPhoto(resource.file_id, options);
@@ -728,20 +732,18 @@ async function sendResourceGroup(
   }
   const parts = await content.resourcesInGroup(group.id);
   if (parts.length === 0) {
-    console.warn(`Resource group ${group.id} has no file parts.`);
+    console.warn(`Resource group ${group.id} has no resources.`);
     return show(
       ctx,
-      section("لا توجد ملفات", "لم تُرفق ملفات بهذا العنوان بعد."),
+      section("لا توجد موارد", "لم تُضف ملفات أو روابط لهذا العنوان بعد."),
       navigation(`nav:f:${group.course_id}:${group.folder_id}:${page}`),
     );
   }
-  for (const [index, resource] of parts.entries()) {
-    await sendResource(ctx, resource, group.title, index, parts.length);
+  for (const resource of parts) {
+    await sendResource(ctx, resource, group.title, parts.length === 1);
   }
   await ctx.reply(
-    parts.length > 1
-      ? `تم إرسال ${parts.length} أجزاء من «${group.title}».`
-      : "يمكنك متابعة التصفح من هنا:",
+    "يمكنك متابعة التصفح من هنا:",
     {
       reply_markup: navigation(
         `nav:f:${group.course_id}:${group.folder_id}:${page}`,
@@ -758,7 +760,7 @@ async function showAdmin(ctx: Context): Promise<void> {
     .row()
     .text("🕰 إدارة أرشيف السنوات", "adm:archive")
     .row()
-    .text("📤 رفع ملفات", "adm:upload")
+    .text("📤 إضافة موارد", "adm:upload")
     .row()
     .text("🗃 إدارة الملفات", "adm:resources")
     .row()
@@ -833,7 +835,7 @@ async function showAdminResourceGroups(
       "إدارة الملفات",
       total
         ? `الموارد: ${total} · الصفحة ${safePage + 1} من ${pageCount}`
-        : "لا توجد موارد في هذا المجلد بعد. استخدم «رفع ملفات» لإضافة موارد.",
+        : "لا توجد موارد في هذا المجلد بعد. استخدم «إضافة موارد» لإضافتها.",
     ),
     keyboard,
   );
@@ -869,7 +871,10 @@ async function showAdminResourceGroup(
     .row();
   for (const [index, part] of visibleParts.entries()) {
     const position = safePartPage * RESOURCE_PAGE_SIZE + index + 1;
-    const title = part.part_label ?? part.file_name ?? `الجزء ${position}`;
+    const title =
+      part.part_label ??
+      part.file_name ??
+      (part.url ? "🔗 رابط" : `الجزء ${position}`);
     keyboard
       .text(buttonLabel(`${position}. ${title}`), "mg:noop")
       .row()
@@ -915,7 +920,7 @@ async function showAdminResourceGroup(
         notice,
         parts.length
           ? `عدد الأجزاء: ${parts.length}`
-          : "لم تُرفع ملفات لهذا العنوان بعد.",
+          : "لم تُضف موارد لهذا العنوان بعد.",
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -1116,7 +1121,7 @@ async function routeManageCallback(
       ctx,
       section(
         "إضافة أجزاء",
-        `أرسل ملفات إضافية إلى «${group.title}»، ثم اكتب /done.`,
+        `أرسل ملفات أو روابط إضافية إلى «${group.title}»، ثم اكتب /done.`,
       ),
       adminNavigation(`mg:g:${id}:${other}:${page}`),
     );
@@ -1572,7 +1577,7 @@ async function showAdminCourse(ctx: Context, courseId: number): Promise<void> {
     )
     .row();
   if (!archived) {
-    keyboard.text("📤 رفع ملفات لهذا المقرر", `up:c:${courseId}`).row();
+    keyboard.text("📤 إضافة موارد لهذا المقرر", `up:c:${courseId}`).row();
   }
   keyboard.text("✏️ إعادة تسمية المقرر", `adm:rename:course:${courseId}`).row();
   withNavigation(
@@ -1582,7 +1587,7 @@ async function showAdminCourse(ctx: Context, courseId: number): Promise<void> {
   );
   await show(
     ctx,
-    section(course.title, "إدارة بيانات المقرر أو إضافة ملفات إلى مجلداته."),
+    section(course.title, "إدارة بيانات المقرر أو إضافة موارد إلى مجلداته."),
     keyboard,
   );
 }
@@ -1753,7 +1758,7 @@ async function routeAdminCallback(
     const levels = await content.currentLevels();
     return show(
       ctx,
-      section("رفع ملفات", "اختر الفرقة ثم الترم والمقرر ومجلد الوجهة."),
+      section("إضافة موارد", "اختر الفرقة ثم الترم والمقرر ومجلد الوجهة."),
       levelsKeyboard(levels, "up:l", "adm:home", "adm:home"),
     );
   }
@@ -2113,7 +2118,7 @@ async function routeUploadCallback(
     const terms = await content.terms(id);
     return show(
       ctx,
-      section("رفع ملفات", "اختر الترم الدراسي."),
+      section("إضافة موارد", "اختر الترم الدراسي."),
       termsKeyboard(terms, "up:t", "adm:upload", "adm:home"),
     );
   }
@@ -2131,7 +2136,7 @@ async function routeUploadCallback(
     const courses = await content.courses(id);
     return show(
       ctx,
-      section("رفع ملفات", "اختر المقرر."),
+      section("إضافة موارد", "اختر المقرر."),
       coursesKeyboard(courses, "up:c", "adm:upload", "adm:home"),
     );
   }
@@ -2288,6 +2293,19 @@ function incomingFile(ctx: Context): IncomingFile | undefined {
   return undefined;
 }
 
+function incomingHttpUrl(text: string | undefined): string | undefined {
+  const candidate = text?.trim();
+  if (!candidate || candidate.length > 2048) return undefined;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function handleState(ctx: Context, state: AdminState): Promise<void> {
   const userId = ctx.from?.id;
   const message = ctx.message;
@@ -2341,12 +2359,12 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         state.groupId,
         state.returnPage,
         state.returnPartPage,
-        `تم حفظ ${state.uploadedCount ?? 0} أجزاء جديدة.`,
+        `تم حفظ ${state.uploadedCount ?? 0} موارد جديدة.`,
       );
     }
     return show(
       ctx,
-      section("اكتمل رفع الملفات", `تم حفظ ${state.uploadedCount ?? 0} ملفًا.`),
+      section("اكتملت إضافة الموارد", `تم حفظ ${state.uploadedCount ?? 0} موردًا.`),
       adminNavigation("adm:home"),
     );
   }
@@ -2405,10 +2423,10 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     return show(
       ctx,
       section(
-        state.mode === "single" ? "رفع ملف واحد" : "رفع أجزاء المورد",
+        state.mode === "single" ? "إضافة مورد" : "إضافة أجزاء المورد",
         state.mode === "single"
-          ? `أرسل ملف «${title}» الآن.`
-          : `أرسل ملفات «${title}» بالترتيب، ثم اكتب /done.`,
+          ? `أرسل ملفًا أو رابطًا مباشرًا لمورد «${title}».`
+          : `أرسل الملفات أو الروابط لمورد «${title}» بالترتيب، ثم اكتب /done.`,
       ),
       adminNavigation("adm:home"),
     );
@@ -2420,9 +2438,10 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       return;
     }
     const file = incomingFile(ctx);
-    if (!file) {
+    const url = file ? undefined : incomingHttpUrl(message.text);
+    if (!file && !url) {
       await ctx.reply(
-        "أرسل مستندًا أو صورة أو فيديو أو ملفًا صوتيًا. اكتب /done للإنهاء.",
+        "أرسل ملفًا أو رابطًا يبدأ بـ http:// أو https://. اكتب /done للإنهاء.",
       );
       return;
     }
@@ -2432,31 +2451,52 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       (await study.createResourceGroup(
         state.courseId,
         state.folderId,
-        state.groupTitle ?? file.fileName ?? "مورد جديد",
+        state.groupTitle ?? file?.fileName ?? "رابط جديد",
         userId,
       ));
-    await study.appendResource({
-      groupId,
-      fileId: file.id,
-      fileUniqueId: file.uniqueId,
-      fileType: file.type,
-      ...(file.fileName ? { fileName: file.fileName } : {}),
-      ...(file.mimeType ? { mimeType: file.mimeType } : {}),
-      ...(partLabel ? { partLabel } : {}),
-      ...(message.caption ? { caption: message.caption } : {}),
-      createdBy: userId,
-    });
+    if (file) {
+      await study.appendResource({
+        groupId,
+        fileId: file.id,
+        fileUniqueId: file.uniqueId,
+        fileType: file.type,
+        ...(file.fileName ? { fileName: file.fileName } : {}),
+        ...(file.mimeType ? { mimeType: file.mimeType } : {}),
+        ...(partLabel ? { partLabel } : {}),
+        ...(message.caption ? { caption: message.caption } : {}),
+        createdBy: userId,
+      });
+    } else {
+      if (!url) throw new Error("The resource URL could not be parsed.");
+      await study.appendResource({
+        groupId,
+        fileType: "link",
+        url,
+        createdBy: userId,
+      });
+    }
     if (env.archiveChannelId) {
       try {
         await ctx.api.sendMessage(
           env.archiveChannelId,
-          `AGR Study resource\nCourse ID: ${state.courseId}\nFolder ID: ${state.folderId}\nGroup ID: ${groupId}\nPart: ${(state.uploadedCount ?? 0) + 1}\nfile_id: ${file.id}\nfile_unique_id: ${file.uniqueId}`,
+          [
+            "AGR Study resource",
+            `Course ID: ${state.courseId}`,
+            `Folder ID: ${state.folderId}`,
+            `Group ID: ${groupId}`,
+            `Part: ${(state.uploadedCount ?? 0) + 1}`,
+            file
+              ? `file_id: ${file.id}\nfile_unique_id: ${file.uniqueId}`
+              : `URL: ${url}`,
+          ].join("\n"),
         );
-        await ctx.api.copyMessage(
-          env.archiveChannelId,
-          message.chat.id,
-          message.message_id,
-        );
+        if (file) {
+          await ctx.api.copyMessage(
+            env.archiveChannelId,
+            message.chat.id,
+            message.message_id,
+          );
+        }
       } catch (error) {
         console.error("Archive channel backup failed:", error);
       }
@@ -2469,7 +2509,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
         groupId,
         state.returnPage ?? 0,
         0,
-        "تم حفظ الملف.",
+        "تم حفظ المورد.",
       );
     }
     await users.setState(
@@ -2478,7 +2518,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       60 * 60 * 1000,
     );
     await ctx.reply(
-      `✅ تم حفظ الجزء ${uploadedCount}. يمكنك إرسال جزء آخر أو كتابة /done.`,
+      `✅ تم حفظ المورد ${uploadedCount}. يمكنك إرسال مورد آخر أو كتابة /done.`,
       {
         reply_markup: adminNavigation(
           state.returnToManage

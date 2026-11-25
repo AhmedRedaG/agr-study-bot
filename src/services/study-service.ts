@@ -193,6 +193,20 @@ export class StudyService {
     if (!(await this.content.resourceGroup(resource.groupId))) {
       throw new Error("The resource group no longer exists.");
     }
+    if (resource.fileType === "link") {
+      if (!resource.url) {
+        throw new Error("A URL is required for a link resource.");
+      }
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(resource.url);
+      } catch {
+        throw new Error("Enter a valid HTTP or HTTPS URL.");
+      }
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+        throw new Error("Only HTTP and HTTPS links are supported.");
+      }
+    }
     return this.content.appendResource(resource);
   }
 

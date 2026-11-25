@@ -72,15 +72,21 @@ CREATE TABLE IF NOT EXISTS resources (
   folder_id INTEGER NOT NULL REFERENCES folders(id),
   part_order INTEGER NOT NULL DEFAULT 1,
   part_label TEXT,
-  file_id TEXT NOT NULL,
-  file_unique_id TEXT NOT NULL,
+  file_id TEXT,
+  file_unique_id TEXT,
   file_type TEXT NOT NULL,
+  url TEXT,
   file_name TEXT,
   mime_type TEXT,
   title TEXT,
   caption TEXT,
   created_by INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (
+    (file_type = 'link' AND url IS NOT NULL AND file_id IS NULL AND file_unique_id IS NULL)
+    OR
+    (file_type <> 'link' AND url IS NULL AND file_id IS NOT NULL AND file_unique_id IS NOT NULL)
+  )
 );
 CREATE TABLE IF NOT EXISTS archive_years (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

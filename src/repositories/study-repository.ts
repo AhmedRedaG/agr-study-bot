@@ -198,7 +198,8 @@ export class StudyRepository {
   async resourcesInGroup(groupId: number): Promise<Resource[]> {
     const result = await db.execute({
       sql: `SELECT id, group_id, course_id, folder_id, part_order, part_label,
-                   file_id, file_unique_id, file_type, file_name, mime_type, title, caption
+                   file_id, file_unique_id, file_type, url, file_name, mime_type,
+                   title, caption
             FROM resources WHERE group_id = ? ORDER BY part_order, id`,
       args: [groupId],
     });
@@ -208,7 +209,8 @@ export class StudyRepository {
   async resource(id: number): Promise<Resource | undefined> {
     const result = await db.execute({
       sql: `SELECT id, group_id, course_id, folder_id, part_order, part_label,
-                   file_id, file_unique_id, file_type, file_name, mime_type, title, caption
+                   file_id, file_unique_id, file_type, url, file_name, mime_type,
+                   title, caption
             FROM resources WHERE id = ?`,
       args: [id],
     });
@@ -515,10 +517,10 @@ export class StudyRepository {
             await tx.execute({
               sql: `INSERT INTO resources
                       (group_id, course_id, folder_id, part_order, part_label,
-                       file_id, file_unique_id, file_type, file_name, mime_type,
+                           file_id, file_unique_id, file_type, url, file_name, mime_type,
                        title, caption, created_by)
                     SELECT ?, ?, folder_id, part_order, part_label,
-                           file_id, file_unique_id, file_type, file_name, mime_type,
+                           file_id, file_unique_id, file_type, url, file_name, mime_type,
                            title, caption, created_by
                     FROM resources WHERE group_id = ? ORDER BY part_order, id`,
               args: [newGroupId, newCourseId, group.id],
@@ -557,15 +559,25 @@ export class StudyRepository {
 
   async appendResource(resource: {
     groupId: number;
-    fileId: string;
-    fileUniqueId: string;
     fileType: string;
+    fileId?: string;
+    fileUniqueId?: string;
+    url?: string;
     fileName?: string;
     mimeType?: string;
     partLabel?: string;
     caption?: string;
     createdBy: number;
   }): Promise<number> {
+    if (
+      resource.fileType === "link"
+        ? !resource.url || resource.fileId || resource.fileUniqueId
+        : !resource.fileId ||
+          !resource.fileUniqueId ||
+          resource.url !== undefined
+    ) {
+      throw new Error("A resource must contain either a valid link or a file.");
+    }
     const tx = await db.transaction("write");
     try {
       const group = await tx.execute({
@@ -582,18 +594,19 @@ export class StudyRepository {
       const result = await tx.execute({
         sql: `INSERT INTO resources
                 (group_id, course_id, folder_id, part_order, part_label,
-                 file_id, file_unique_id, file_type, file_name, mime_type,
+                 file_id, file_unique_id, file_type, url, file_name, mime_type,
                  title, caption, created_by)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
         args: [
           resource.groupId,
           Number(row.course_id),
           Number(row.folder_id),
           partOrder,
           resource.partLabel ?? null,
-          resource.fileId,
-          resource.fileUniqueId,
+          resource.fileId ?? null,
+          resource.fileUniqueId ?? null,
           resource.fileType,
+          resource.url ?? null,
           resource.fileName ?? null,
           resource.mimeType ?? null,
           resource.caption ?? null,
@@ -641,7 +654,8 @@ export class StudyRepository {
   ): Promise<void> {
     const result = await db.execute({
       sql: `UPDATE resources
-            SET file_id = ?, file_unique_id = ?, file_type = ?, file_name = ?, mime_type = ?
+            SET file_id = ?, file_unique_id = ?, file_type = ?, file_name = ?,
+                mime_type = ?, url = NULL
             WHERE id = ? AND group_id = ?`,
       args: [
         file.fileId,
@@ -737,10 +751,17 @@ export class StudyRepository {
             WHERE l.archive_year_id IS NULL AND l.is_archived = 0 AND l.active = 1
               AND t.active = 1 AND c.active = 1
               AND (c.department_id IS NULL OR d.active = 1)
-              AND (g.title LIKE ? OR r.file_name LIKE ? OR r.part_label LIKE ? OR c.title LIKE ?)
+              AND (g.title LIKE ? OR r.file_name LIKE ? OR r.part_label LIKE ?
+                   OR r.url LIKE ? OR c.title LIKE ?)
             GROUP BY g.id
             ORDER BY g.sort_order DESC, g.id DESC LIMIT 10`,
-      args: [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`],
+      args: [
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+      ],
     });
     return result.rows as unknown as Array<
       ResourceGroupSummary & {

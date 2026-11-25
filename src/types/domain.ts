@@ -46,9 +46,10 @@ export interface Resource {
   folder_id: number;
   part_order: number;
   part_label: string | null;
-  file_id: string;
-  file_unique_id: string;
+  file_id: string | null;
+  file_unique_id: string | null;
   file_type: string;
+  url: string | null;
   file_name: string | null;
   mime_type: string | null;
   title: string | null;
