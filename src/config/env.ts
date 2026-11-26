@@ -72,9 +72,7 @@ const legacyTelegramContact =
   /^https:\/\/(?:t\.me|telegram\.me)\//i.test(supportContact)
     ? supportContact
     : undefined;
-const supportTelegram =
-  optional("SUPPORT_TELEGRAM") ??
-  legacyTelegramContact;
+const supportTelegram = optional("SUPPORT_TELEGRAM") ?? legacyTelegramContact;
 
 export const env = {
   botToken: required("BOT_TOKEN"),
@@ -96,6 +94,6 @@ export const env = {
   broadcastDelayMs: Math.max(35, broadcastDelayMs),
 };
 
-export function isAdmin(userId: number | undefined): boolean {
+export function isSuperAdmin(userId: number | undefined): boolean {
   return userId !== undefined && env.adminIds.has(userId);
 }

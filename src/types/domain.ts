@@ -74,6 +74,46 @@ export interface ArchiveYear {
   title: string;
 }
 
+export interface AdminRole {
+  user_id: number;
+  all_courses: number;
+  granted_by: number;
+  full_name: string | null;
+  phone: string | null;
+  telegram_username: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface AdminRoleSummary extends AdminRole {
+  first_name: string | null;
+  username: string | null;
+  scope_count: number;
+}
+
+export interface AdminScope {
+  id: number;
+  user_id: number;
+  level_id: number | null;
+  term_id: number | null;
+  department_id: number | null;
+  course_id: number | null;
+}
+
+export interface AdminScopeDetail extends AdminScope {
+  level_title: string | null;
+  term_title: string | null;
+  department_title: string | null;
+  course_title: string | null;
+}
+
+export interface CourseScopeRef {
+  course_id: number;
+  term_id: number;
+  level_id: number;
+  department_id: number | null;
+}
+
 export type AdminState =
   | {
       kind: "text";
@@ -98,6 +138,15 @@ export type AdminState =
     }
   | { kind: "search" }
   | { kind: "my-level" }
+  | {
+      kind: "grant-admin";
+      step: "id" | "name" | "phone" | "telegram" | "notes";
+      targetUserId?: number;
+      fullName?: string;
+      phone?: string;
+      telegramUsername?: string;
+      notes?: string;
+    }
   | { kind: "my-term"; levelId: number }
   | {
       kind: "feedback";
