@@ -2,6 +2,7 @@ import { db } from "../db/client.js";
 import type {
   ArchiveYear,
   Course,
+  CourseScopeRef,
   Department,
   Folder,
   Level,
@@ -27,7 +28,10 @@ export class StudyRepository {
     return result.rows as unknown as Level[];
   }
 
-  async archivedLevels(archiveYearId: number, activeOnly = true): Promise<Level[]> {
+  async archivedLevels(
+    archiveYearId: number,
+    activeOnly = true,
+  ): Promise<Level[]> {
     const result = await db.execute({
       sql: `SELECT id, title, sort_order, active, is_archived, archive_year_id FROM levels
             WHERE archive_year_id = ? AND is_archived = 1
@@ -37,9 +41,20 @@ export class StudyRepository {
     return result.rows as unknown as Level[];
   }
 
-  async searchCourses(
-    keyword: string,
-  ): Promise<
+  async currentCourseRefs(): Promise<CourseScopeRef[]> {
+    const result = await db.execute({
+      sql: `SELECT c.id AS course_id, c.term_id, t.level_id, c.department_id
+            FROM courses c
+            JOIN terms t ON t.id = c.term_id
+            JOIN levels l ON l.id = t.level_id
+            WHERE l.archive_year_id IS NULL AND l.is_archived = 0
+              AND l.active = 1 AND t.active = 1 AND c.active = 1
+            ORDER BY l.sort_order, t.sort_order, c.sort_order, c.id`,
+    });
+    return result.rows as unknown as CourseScopeRef[];
+  }
+
+  async searchCourses(keyword: string): Promise<
     Array<
       Course & {
         level_title: string;
@@ -81,10 +96,7 @@ export class StudyRepository {
     return result.rows as unknown as Term[];
   }
 
-  async departments(
-    levelId: number,
-    activeOnly = true,
-  ): Promise<Department[]> {
+  async departments(levelId: number, activeOnly = true): Promise<Department[]> {
     const result = await db.execute({
       sql: `SELECT id, level_id, title, sort_order, active FROM departments
             WHERE level_id = ? ${activeOnly ? "AND active = 1" : ""}
@@ -178,7 +190,10 @@ export class StudyRepository {
     return result.rows as unknown as ResourceGroupSummary[];
   }
 
-  async countResourceGroups(courseId: number, folderId: number): Promise<number> {
+  async countResourceGroups(
+    courseId: number,
+    folderId: number,
+  ): Promise<number> {
     const result = await db.execute({
       sql: "SELECT COUNT(*) AS count FROM resource_groups WHERE course_id = ? AND folder_id = ?",
       args: [courseId, folderId],
@@ -224,7 +239,12 @@ export class StudyRepository {
     const result = await db.execute({
       sql: `INSERT INTO levels (title, archive_year_id, is_archived, sort_order) VALUES (?, ?, ?, COALESCE(
         (SELECT MAX(sort_order) + 1 FROM levels WHERE archive_year_id IS ?), 0))`,
-      args: [title, archiveYearId, archiveYearId === null ? 0 : 1, archiveYearId],
+      args: [
+        title,
+        archiveYearId,
+        archiveYearId === null ? 0 : 1,
+        archiveYearId,
+      ],
     });
     return idOf(result.lastInsertRowid);
   }
@@ -480,12 +500,7 @@ export class StudyRepository {
             sql: `INSERT INTO courses
                     (term_id, department_id, title, sort_order, active)
                   VALUES (?, ?, ?, ?, 1)`,
-            args: [
-              newTermId,
-              departmentId,
-              course.title,
-              course.sort_order,
-            ],
+            args: [newTermId, departmentId, course.title, course.sort_order],
           });
           const oldCourseId = course.id;
           const newCourseId = idOf(newCourse.lastInsertRowid);
@@ -679,9 +694,16 @@ export class StudyRepository {
         sql: "SELECT id FROM resource_groups WHERE id = ?",
         args: [id],
       });
-      if (!group.rows[0]) throw new Error("The resource group no longer exists.");
-      await tx.execute({ sql: "DELETE FROM resources WHERE group_id = ?", args: [id] });
-      await tx.execute({ sql: "DELETE FROM resource_groups WHERE id = ?", args: [id] });
+      if (!group.rows[0])
+        throw new Error("The resource group no longer exists.");
+      await tx.execute({
+        sql: "DELETE FROM resources WHERE group_id = ?",
+        args: [id],
+      });
+      await tx.execute({
+        sql: "DELETE FROM resource_groups WHERE id = ?",
+        args: [id],
+      });
       await tx.commit();
     } catch (error) {
       await tx.rollback();
@@ -696,7 +718,8 @@ export class StudyRepository {
         sql: "SELECT id FROM resources WHERE id = ? AND group_id = ?",
         args: [resourceId, groupId],
       });
-      if (!part.rows[0]) throw new Error("The selected resource part no longer exists.");
+      if (!part.rows[0])
+        throw new Error("The selected resource part no longer exists.");
       await tx.execute({
         sql: "DELETE FROM resources WHERE id = ? AND group_id = ?",
         args: [resourceId, groupId],
@@ -706,7 +729,10 @@ export class StudyRepository {
         args: [groupId],
       });
       if (remaining.rows.length === 0) {
-        await tx.execute({ sql: "DELETE FROM resource_groups WHERE id = ?", args: [groupId] });
+        await tx.execute({
+          sql: "DELETE FROM resource_groups WHERE id = ?",
+          args: [groupId],
+        });
       } else {
         for (const [index, row] of remaining.rows.entries()) {
           await tx.execute({
@@ -728,9 +754,7 @@ export class StudyRepository {
     }
   }
 
-  async searchResourceGroups(
-    keyword: string,
-  ): Promise<
+  async searchResourceGroups(keyword: string): Promise<
     Array<
       ResourceGroupSummary & {
         course_title: string;

@@ -6,10 +6,10 @@ AGR Study is a Telegram academic-resource bot built with Node.js, strict TypeScr
 
 - `src/config`: validates required environment variables and centralizes runtime configuration.
 - `src/db`: shared Turso client and idempotent schema setup.
-- `src/repositories`: parameterized persistence operations for academic content and users/sessions.
-- `src/services`: domain-level orchestration for content and paced broadcasts.
+- `src/repositories`: parameterized persistence operations for academic content, users/sessions, and Content Admin roles/scopes.
+- `src/services`: domain-level orchestration for content, access control, and paced broadcasts.
 - `src/bot`: grammY middleware, callback/action routing, inline keyboards, student views, and admin workflows.
-- `api/webhook.ts`: Vercel HTTP handler using grammY's standard `Request`/`Response` webhook adapter.
+- `api/webhook.ts`: Vercel Node-style HTTP handler using grammY's `http` webhook adapter with body parsing disabled.
 - `scripts/init-db.ts` and `schema.sql`: initialize tables and the default content folders.
 
 Repositories own SQL access; handlers translate Telegram updates into service/repository operations. The `user_sessions` table stores JSON workflow state with an expiration timestamp, so an admin upload or multi-step action remains available across stateless Vercel invocations. Callback data contains only short action names and numeric database IDs (not user-provided titles), remaining comfortably below Telegram's 64-byte limit.
@@ -23,22 +23,22 @@ Repositories own SQL access; handlers translate Telegram updates into service/re
 
 Copy `.env.example` to `.env` for local work and fill in:
 
-| Variable                    | Required               | Purpose                                                               |
-| --------------------------- | ---------------------- | --------------------------------------------------------------------- |
-| `BOT_TOKEN`                 | Yes                    | Telegram bot token                                                    |
-| `ADMIN_IDS`                 | Yes                    | Comma-separated Telegram user IDs allowed to use `/admin`             |
-| `TURSO_DATABASE_URL`        | Yes                    | Turso `libsql://...` database URL                                     |
-| `TURSO_AUTH_TOKEN`          | Yes                    | Turso database auth token                                             |
-| `WEBHOOK_SECRET_TOKEN`      | Production recommended | Validates Telegram's webhook secret header                            |
-| `ARCHIVE_CHANNEL_ID`        | No                     | Optional private channel for upload metadata and a backup copy        |
-| `REQUIRED_CHANNEL_ID`       | No                     | Channel ID/username used for optional force-subscribe verification    |
-| `REQUIRED_CHANNEL_USERNAME` | No                     | Public channel username used to build the join button                 |
-| `SUPPORT_CONTACT`           | No                     | Fallback contact handle, email, URL, or text                           |
-| `SUPPORT_TELEGRAM`          | No                     | Support Telegram username (`@name`) or `https://t.me/...` URL           |
-| `SUPPORT_EMAIL`             | No                     | Support email shown with a one-tap copy button                         |
-| `SUPPORT_URL`               | No                     | HTTP(S) link to a support or feedback form                             |
-| `OFFICIAL_CHANNEL_URL`      | No                     | HTTP(S) link to the official Telegram channel                          |
-| `BROADCAST_DELAY_MS`        | No                     | Delay between broadcast recipients; defaults to 45 ms (minimum 35 ms) |
+| Variable                    | Required               | Purpose                                                                    |
+| --------------------------- | ---------------------- | -------------------------------------------------------------------------- |
+| `BOT_TOKEN`                 | Yes                    | Telegram bot token                                                         |
+| `ADMIN_IDS`                 | Yes                    | Comma-separated Super Admin Telegram user IDs allowed full `/admin` access |
+| `TURSO_DATABASE_URL`        | Yes                    | Turso `libsql://...` database URL                                          |
+| `TURSO_AUTH_TOKEN`          | Yes                    | Turso database auth token                                                  |
+| `WEBHOOK_SECRET_TOKEN`      | Production recommended | Validates Telegram's webhook secret header                                 |
+| `ARCHIVE_CHANNEL_ID`        | No                     | Optional private channel for upload metadata and a backup copy             |
+| `REQUIRED_CHANNEL_ID`       | No                     | Channel ID/username used for optional force-subscribe verification         |
+| `REQUIRED_CHANNEL_USERNAME` | No                     | Public channel username used to build the join button                      |
+| `SUPPORT_CONTACT`           | No                     | Fallback contact handle, email, URL, or text                               |
+| `SUPPORT_TELEGRAM`          | No                     | Support Telegram username (`@name`) or `https://t.me/...` URL              |
+| `SUPPORT_EMAIL`             | No                     | Support email shown with a one-tap copy button                             |
+| `SUPPORT_URL`               | No                     | HTTP(S) link to a support or feedback form                                 |
+| `OFFICIAL_CHANNEL_URL`      | No                     | HTTP(S) link to the official Telegram channel                              |
+| `BROADCAST_DELAY_MS`        | No                     | Delay between broadcast recipients; defaults to 45 ms (minimum 35 ms)      |
 
 Keep tokens out of source control. The bot needs administrator access to the required channel to reliably verify membership. For upload backups, grant the bot permission to post in the archive channel.
 
@@ -74,7 +74,8 @@ Check webhook health with Telegram's `getWebhookInfo` API method. To switch back
 
 ## Admin and content workflows
 
-- `/admin` is restricted to `ADMIN_IDS`; `/cancel` exits the current prompt.
+- `/admin` is available to Super Admins (`ADMIN_IDS`) and database-backed Content Admins. Super Admins retain full access to academic structure, archives, broadcasts, and staff management. Content Admins can only upload and manage resources for the courses granted to them; structural actions are hidden and rejected server-side. `/cancel` exits the current prompt.
+- Super Admins use **مشرفو المحتوى** in `/admin` to grant or revoke the Content Admin role, view current uploaders, and scope access to all current courses, a level, a term, a department, or a single course. Granting is a guided flow: enter the Telegram user ID and name, then optionally add a phone number, Telegram username, and notes (each optional step has a **تخطي** button and also accepts `-`). These details appear on the uploader's staff page. Multiple scopes can be combined; a grant with no scopes and no global access can manage nothing.
 - Manage current (non-archived) levels, ترمات, departments, and courses with the admin menus. Hidden current levels remain available to admins to restore, but archived levels and archived snapshot sources are filtered out of current-year menus. Departments belong to a level and appear after a student selects a ترم. When adding a course, admins explicitly choose **Shared Courses** or a department; they can also start from a department and select its target ترم. Course assignments are scoped to that exact ترم and department, so the same department can have a different course list in each ترم. Shared courses appear on the term screen, and department screens list only courses assigned to that department, avoiding repeated shared-course entries while keeping each course and its resources stored only once.
 - Manage dynamic folders (add, rename, hide/show, and reorder). New active folders appear in every course's student menu automatically. The seed contains Lectures, Sections, Summaries, Past Exams, and Books.
 - Create an archive year such as `2024-2025`. Snapshotting a current level transactionally clones its ترمات, departments, course assignments, and resource file references into that archive, then marks and hides the source level. Archived levels appear under that year and can be returned to current levels with **إعادة إلى الفرق الحالية**; the archive and active-level menus refresh after this action. Existing Telegram file IDs remain reusable. Admins can also create archived levels and populate their structure directly.
@@ -88,7 +89,7 @@ Students can browse active and archived content, search current resources, set a
 
 `schema.sql` is the standalone schema and default-folder seed. `npm run db:init` applies the matching idempotent schema programmatically and inserts missing defaults. The bot also creates the schema and seeds any missing default folders on startup/webhook requests, which supports clean first deployment; applying `db:init` explicitly before launch is still recommended.
 
-Archive snapshots are performed in one write transaction. Archived levels share the same levels/terms/departments/courses/resources tables as current content, with `levels.archive_year_id` and `levels.is_archived` distinguishing them. The schema assumes a fresh database and does not migrate existing tables. Before using this version with an older development database, point `TURSO_DATABASE_URL` at a new database or reset the existing one. In the schema, `courses.department_id IS NULL` represents a shared course; otherwise it is assigned to one department, always within the course's `term_id`. Current-level queries explicitly exclude both archive membership and the archive flag. User preference and broadcast audience selection are stored independently from browsing, so users can browse any level without changing their saved preference.
+Archive snapshots are performed in one write transaction. Archived levels share the same levels/terms/departments/courses/resources tables as current content, with `levels.archive_year_id` and `levels.is_archived` distinguishing them. Content Admin access is stored in `admin_roles` (`all_courses`) and `admin_role_scopes` (one nullable target among level, term, department, or course per row); both tables are created idempotently by `ensureSchema()`/`schema.sql` on the next startup. The schema otherwise assumes a fresh database and does not migrate existing tables. Before using this version with an older development database, point `TURSO_DATABASE_URL` at a new database or reset the existing one. In the schema, `courses.department_id IS NULL` represents a shared course; otherwise it is assigned to one department, always within the course's `term_id`. Current-level queries explicitly exclude both archive membership and the archive flag. User preference and broadcast audience selection are stored independently from browsing, so users can browse any level without changing their saved preference.
 
 ## Validation
 

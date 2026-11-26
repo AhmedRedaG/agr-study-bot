@@ -95,6 +95,31 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS admin_roles (
+  user_id INTEGER PRIMARY KEY,
+  all_courses INTEGER NOT NULL DEFAULT 1,
+  granted_by INTEGER NOT NULL,
+  full_name TEXT,
+  phone TEXT,
+  telegram_username TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS admin_role_scopes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES admin_roles(user_id) ON DELETE CASCADE,
+  level_id INTEGER REFERENCES levels(id) ON DELETE CASCADE,
+  term_id INTEGER REFERENCES terms(id) ON DELETE CASCADE,
+  department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+  course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK ((level_id IS NOT NULL) + (term_id IS NOT NULL) +
+         (department_id IS NOT NULL) + (course_id IS NOT NULL) = 1)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_role_scopes_user ON admin_role_scopes(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_role_scopes_unique
+  ON admin_role_scopes(user_id, COALESCE(level_id, -1), COALESCE(term_id, -1),
+                       COALESCE(department_id, -1), COALESCE(course_id, -1));
 CREATE INDEX IF NOT EXISTS idx_levels_archive ON levels(archive_year_id, active, sort_order);
 CREATE INDEX IF NOT EXISTS idx_terms_level ON terms(level_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_courses_term ON courses(term_id, sort_order);

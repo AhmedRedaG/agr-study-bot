@@ -1,12 +1,21 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
-import { env, isAdmin } from "../config/env.js";
+import { env, isSuperAdmin } from "../config/env.js";
 import { ensureSchema } from "../db/schema.js";
 import { StudyRepository } from "../repositories/study-repository.js";
 import { UserRepository } from "../repositories/user-repository.js";
+import {
+  AccessService,
+  type ScopeTargetType,
+} from "../services/access-service.js";
 import { BroadcastService } from "../services/broadcast-service.js";
 import { scheduleBackgroundTask } from "../services/background-tasks.js";
 import { StudyService } from "../services/study-service.js";
-import type { AdminState, Resource, ResourceGroup } from "../types/domain.js";
+import type {
+  AdminScopeDetail,
+  AdminState,
+  Resource,
+  ResourceGroup,
+} from "../types/domain.js";
 import {
   archivesKeyboard,
   coursesKeyboard,
@@ -22,9 +31,16 @@ import {
 const bot = new Bot(env.botToken);
 const content = new StudyRepository();
 const study = new StudyService(content);
+const access = new AccessService();
 const users = new UserRepository();
 const broadcast = new BroadcastService(content, users);
 const RESOURCE_PAGE_SIZE = 8;
+const CONTENT_ADMIN_ACTIONS = new Set([
+  "home",
+  "student",
+  "upload",
+  "resources",
+]);
 
 async function show(
   ctx: Context,
@@ -93,6 +109,15 @@ function navigation(back?: string): InlineKeyboard {
 
 function adminNavigation(back?: string): InlineKeyboard {
   return withNavigation(new InlineKeyboard(), back, "adm:home");
+}
+
+async function showForbidden(ctx: Context): Promise<void> {
+  const canAdmin = ctx.from ? await access.canAccessAdmin(ctx.from.id) : false;
+  await show(
+    ctx,
+    section("غير مصرح", "هذا الإجراء غير متاح لصلاحيتك الحالية."),
+    canAdmin ? adminNavigation("adm:home") : navigation("nav:home"),
+  );
 }
 
 async function sendHome(ctx: Context): Promise<void> {
@@ -282,7 +307,10 @@ async function startFeedback(
 }
 
 async function ensureSubscribed(ctx: Context): Promise<boolean> {
-  if (!env.requiredChannelId || !ctx.from || isAdmin(ctx.from.id)) return true;
+  if (!env.requiredChannelId || !ctx.from || isSuperAdmin(ctx.from.id)) {
+    return true;
+  }
+  if (await access.canAccessAdmin(ctx.from.id)) return true;
   try {
     const member = await ctx.api.getChatMember(
       env.requiredChannelId,
@@ -347,7 +375,7 @@ bot.command("help", async (ctx) => {
 });
 
 bot.command("admin", async (ctx) => {
-  if (!ctx.from || !isAdmin(ctx.from.id)) {
+  if (!ctx.from || !(await access.canAccessAdmin(ctx.from.id))) {
     await ctx.reply("هذا القسم مخصص لفريق إدارة AGR Study.");
     return;
   }
@@ -361,7 +389,7 @@ bot.command("cancel", async (ctx) => {
     await handleState(ctx, state);
     return;
   }
-  const keyboard = isAdmin(ctx.from?.id)
+  const keyboard = (await access.canAccessAdmin(ctx.from?.id))
     ? adminNavigation("adm:home")
     : navigation("nav:home");
   await show(
@@ -794,30 +822,20 @@ async function routeCallback(ctx: Context, data: string): Promise<void> {
   }
 
   if (data.startsWith("adm:")) {
-    if (!isAdmin(ctx.from?.id))
-      return show(
-        ctx,
-        section("غير مصرح", "هذا الإجراء مخصص للإدارة."),
-        navigation("nav:home"),
-      );
+    if (!(await access.canAccessAdmin(ctx.from?.id))) {
+      return showForbidden(ctx);
+    }
     return routeAdminCallback(ctx, parts);
   }
   if (data.startsWith("up:")) {
-    if (!isAdmin(ctx.from?.id))
-      return show(
-        ctx,
-        section("غير مصرح", "هذا الإجراء مخصص للإدارة."),
-        navigation("nav:home"),
-      );
+    if (!(await access.canAccessAdmin(ctx.from?.id))) {
+      return showForbidden(ctx);
+    }
     return routeUploadCallback(ctx, parts);
   }
   if (data.startsWith("mg:")) {
-    if (!isAdmin(ctx.from?.id)) {
-      return show(
-        ctx,
-        section("غير مصرح", "هذا الإجراء مخصص للإدارة."),
-        navigation("nav:home"),
-      );
+    if (!(await access.canAccessAdmin(ctx.from?.id))) {
+      return showForbidden(ctx);
     }
     return routeManageCallback(ctx, parts);
   }
@@ -922,19 +940,30 @@ async function sendResourceGroup(
 }
 
 async function showAdmin(ctx: Context): Promise<void> {
-  const keyboard = new InlineKeyboard()
-    .text("📚 إدارة الفرق والمقررات", "adm:levels")
-    .row()
-    .text("🗂 إدارة مجلدات المحتوى", "adm:folders")
-    .row()
-    .text("🕰 إدارة أرشيف السنوات", "adm:archive")
-    .row()
+  const superAdmin = isSuperAdmin(ctx.from?.id);
+  const keyboard = new InlineKeyboard();
+  if (superAdmin) {
+    keyboard
+      .text("📚 إدارة الفرق والمقررات", "adm:levels")
+      .row()
+      .text("🗂 إدارة مجلدات المحتوى", "adm:folders")
+      .row()
+      .text("🕰 إدارة أرشيف السنوات", "adm:archive")
+      .row();
+  }
+  keyboard
     .text("📤 إضافة موارد", "adm:upload")
     .row()
     .text("🗃 إدارة الملفات", "adm:resources")
-    .row()
-    .text("📣 إرسال إعلان", "adm:broadcast")
-    .row()
+    .row();
+  if (superAdmin) {
+    keyboard
+      .text("👥 مشرفو المحتوى", "adm:staff")
+      .row()
+      .text("📣 إرسال إعلان", "adm:broadcast")
+      .row();
+  }
+  keyboard
     .text("🧑‍🎓 واجهة الطلاب", "adm:student")
     .row()
     .text(labels.main, "adm:home");
@@ -942,17 +971,440 @@ async function showAdmin(ctx: Context): Promise<void> {
     ctx,
     section(
       "لوحة الإدارة",
-      "تحكم في المحتوى والهيكل الأكاديمي والإعلانات من داخل Telegram.",
+      superAdmin
+        ? "تحكم في المحتوى والهيكل الأكاديمي والإعلانات وصلاحيات الفريق من داخل Telegram."
+        : "يمكنك إضافة الموارد وإدارتها للمقررات المسندة إليك",
     ),
     keyboard,
   );
 }
 
-async function showAdminResourceLevels(ctx: Context): Promise<void> {
+function isScopeTargetType(
+  value: string | undefined,
+): value is ScopeTargetType {
+  return (
+    value === "level" ||
+    value === "term" ||
+    value === "department" ||
+    value === "course"
+  );
+}
+
+function describeScope(scope: AdminScopeDetail): string {
+  if (scope.course_id !== null) {
+    return `📘 ${scope.course_title ?? "مقرر"} · ${scope.term_title ?? ""} · ${scope.level_title ?? ""}`;
+  }
+  if (scope.term_id !== null) {
+    return `📚 ${scope.term_title ?? "ترم"} · ${scope.level_title ?? ""}`;
+  }
+  if (scope.department_id !== null) {
+    return `🏛️ ${scope.department_title ?? "قسم"} · ${scope.level_title ?? ""}`;
+  }
+  return `🎓 ${scope.level_title ?? "فرقة"}`;
+}
+
+type GrantAdminState = Extract<AdminState, { kind: "grant-admin" }>;
+type GrantOptionalStep = "phone" | "telegram" | "notes";
+
+function isGrantOptionalStep(
+  value: string | undefined,
+): value is GrantOptionalStep {
+  return value === "phone" || value === "telegram" || value === "notes";
+}
+
+function grantSkipKeyboard(step: GrantOptionalStep): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
+    .text("⏭ تخطي", `adm:staffskip:${step}`)
+    .row();
+  return withNavigation(keyboard, "adm:staff", "adm:home");
+}
+
+function grantPrompt(step: GrantAdminState["step"]): {
+  title: string;
+  detail: string;
+} {
+  if (step === "id") {
+    return {
+      title: "إضافة مشرف محتوى",
+      detail:
+        "أرسل معرّف Telegram الرقمي للمستخدم. يمكنك الحصول عليه من معلومات الحساب أو من بوت @userinfobot او @getmyid_bot",
+    };
+  }
+  if (step === "name") {
+    return {
+      title: "اسم مشرف المحتوى",
+      detail: "أرسل الاسم الكامل للمشرف (100 حرف كحد أقصى).",
+    };
+  }
+  if (step === "phone") {
+    return {
+      title: "رقم الهاتف",
+      detail: "أرسل رقم هاتف المشرف، أو اضغط «تخطي» إن لم يكن متاحًا.",
+    };
+  }
+  if (step === "telegram") {
+    return {
+      title: "حساب Telegram",
+      detail: "أرسل اسم المستخدم على Telegram مثل @username، أو اضغط «تخطي».",
+    };
+  }
+  return {
+    title: "ملاحظات إضافية",
+    detail: "أرسل أي ملاحظات عن المشرف، أو اضغط «تخطي».",
+  };
+}
+
+async function promptGrantAdminStep(
+  ctx: Context,
+  state: GrantAdminState,
+): Promise<void> {
+  const prompt = grantPrompt(state.step);
+  await show(
+    ctx,
+    section(prompt.title, prompt.detail),
+    isGrantOptionalStep(state.step)
+      ? grantSkipKeyboard(state.step)
+      : adminNavigation("adm:staff"),
+  );
+}
+
+async function completeGrantAdmin(
+  ctx: Context,
+  superAdminId: number,
+  state: GrantAdminState,
+): Promise<void> {
+  if (state.targetUserId === undefined || !state.fullName) {
+    await users.clearState(superAdminId);
+    await ctx.reply("انتهت صلاحية هذه العملية. ابدأ من جديد من مشرفو المحتوى.");
+    return;
+  }
+  try {
+    await access.grantContentAdmin(state.targetUserId, superAdminId, {
+      fullName: state.fullName,
+      ...(state.phone ? { phone: state.phone } : {}),
+      ...(state.telegramUsername
+        ? { telegramUsername: state.telegramUsername }
+        : {}),
+      ...(state.notes ? { notes: state.notes } : {}),
+    });
+  } catch (error) {
+    console.error("Could not grant content admin role:", error);
+    await users.clearState(superAdminId);
+    await ctx.reply(
+      "تعذر منح الصلاحية بهذه البيانات. تحقق من المعرّف والاسم وأعد المحاولة.",
+    );
+    return;
+  }
+  await users.clearState(superAdminId);
+  return showAdminStaffMember(
+    ctx,
+    state.targetUserId,
+    "تمت إضافة مشرف المحتوى.",
+  );
+}
+
+async function skipGrantAdminStep(
+  ctx: Context,
+  superAdminId: number,
+  state: GrantAdminState,
+): Promise<void> {
+  if (state.step === "phone") {
+    const next: GrantAdminState = { ...state, step: "telegram" };
+    await users.setState(superAdminId, next);
+    return promptGrantAdminStep(ctx, next);
+  }
+  if (state.step === "telegram") {
+    const next: GrantAdminState = { ...state, step: "notes" };
+    await users.setState(superAdminId, next);
+    return promptGrantAdminStep(ctx, next);
+  }
+  if (state.step === "notes") {
+    return completeGrantAdmin(ctx, superAdminId, state);
+  }
+  return promptGrantAdminStep(ctx, state);
+}
+
+async function showAdminStaff(ctx: Context, notice?: string): Promise<void> {
+  const admins = await access.listContentAdmins();
+  const keyboard = new InlineKeyboard()
+    .text("＋ " + "اضافة او تجديد مشرف محتوي", "adm:staffadd")
+    .row();
+  for (const admin of admins) {
+    const name =
+      admin.full_name ??
+      admin.first_name ??
+      admin.username ??
+      `مستخدم ${admin.user_id}`;
+    const accessLabel =
+      admin.all_courses === 1 ? "كل المقررات" : `${admin.scope_count} نطاق`;
+    keyboard
+      .text(buttonLabel(`${name} · ${accessLabel}`), `adm:usr:${admin.user_id}`)
+      .row();
+  }
+  withNavigation(keyboard, "adm:home", "adm:home");
+  await show(
+    ctx,
+    section(
+      "مشرفو المحتوى",
+      [
+        notice,
+        admins.length
+          ? `عدد المشرفين: ${admins.length}\nاختر مشرفًا لإدارة نطاقه أو إلغاء صلاحيته.`
+          : "لا يوجد مشرفو محتوى بعد. أضف مشرفًا بمعرّف Telegram الرقمي.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminStaffMember(
+  ctx: Context,
+  userId: number,
+  notice?: string,
+): Promise<void> {
+  const admin = await access.contentAdmin(userId);
+  if (!admin) {
+    return showAdminStaff(ctx, "هذا المستخدم ليس مشرف محتوى حاليًا.");
+  }
+  const keyboard = new InlineKeyboard();
+  if (admin.role.all_courses === 1) {
+    keyboard.text("🔒 تقييد بنطاق", `adm:usrscope:${userId}`).row();
+  } else {
+    keyboard
+      .text("➕ إضافة نطاق", `adm:usrscope:${userId}`)
+      .row()
+      .text("🌐 منح وصول كل المقررات", `adm:usrmode:${userId}:all`)
+      .row();
+  }
+  keyboard.text("🗑 إلغاء الصلاحية", `adm:usrrevoke:${userId}`).row();
+  for (const scope of admin.scopes) {
+    keyboard
+      .text(
+        buttonLabel(`❌ إزالة: ${describeScope(scope)}`),
+        `adm:usrsdel:${userId}:${scope.id}`,
+      )
+      .row();
+  }
+  withNavigation(keyboard, "adm:staff", "adm:home");
+  const limits =
+    admin.role.all_courses === 1
+      ? "كل المقررات الحالية"
+      : admin.scopes.length
+        ? admin.scopes.map((scope) => `• ${describeScope(scope)}`).join("\n")
+        : "لا توجد نطاقات مسندة؛ لن يتمكن من إدارة أي مقرر حاليًا.";
+  const displayName = admin.role.full_name ?? `مستخدم ${userId}`;
+  await show(
+    ctx,
+    section(
+      `مشرف المحتوى ${displayName}`,
+      [
+        notice,
+        [
+          `المعرّف: ${userId}`,
+          `الهاتف: ${admin.role.phone ?? "غير مسجل"}`,
+          `التلجرام: ${admin.role.telegram_username ? `@${admin.role.telegram_username}` : "غير مسجل"}`,
+          admin.role.notes
+            ? `ملاحظات: ${admin.role.notes}`
+            : "ملاحظات: لا توجد",
+        ].join("\n"),
+        `🔐 الوصول: ${limits}`,
+        "النطاقات المضافة تُقيّد الوصول إليها فقط، ويمكن دمج أكثر من نطاق.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminScopeTypes(
+  ctx: Context,
+  userId: number,
+): Promise<void> {
+  const keyboard = new InlineKeyboard()
+    .text("🎓 فرقة كاملة", `adm:usrpick:${userId}:level`)
+    .row()
+    .text("📚 ترم كامل", `adm:usrpick:${userId}:term`)
+    .row()
+    .text("🏛️ قسم كامل", `adm:usrpick:${userId}:department`)
+    .row()
+    .text("📘 مقرر واحد", `adm:usrpick:${userId}:course`)
+    .row();
+  withNavigation(keyboard, `adm:usr:${userId}`, "adm:home");
+  await show(
+    ctx,
+    section(
+      "إضافة نطاق للمشرف",
+      "اختر نوع النطاق. عند إضافة أول نطاق سيصبح وصول المشرف مقيدًا به.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminScopeLevels(
+  ctx: Context,
+  userId: number,
+  type: ScopeTargetType,
+): Promise<void> {
   const levels = await content.currentLevels();
+  const keyboard = new InlineKeyboard();
+  for (const level of levels) {
+    keyboard
+      .text(buttonLabel(level.title), `adm:usrlv:${userId}:${type}:${level.id}`)
+      .row();
+  }
+  withNavigation(keyboard, `adm:usrscope:${userId}`, "adm:home");
+  await show(
+    ctx,
+    section(
+      "اختيار الفرقة",
+      levels.length
+        ? `اختر الفرقة لنطاق الـ${type === "level" ? "فرقة" : type === "term" ? "ترم" : type === "department" ? "قسم" : "مقرر"}.`
+        : "لا توجد فرق حالية.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminScopeLevelTarget(
+  ctx: Context,
+  userId: number,
+  type: ScopeTargetType,
+  levelId: number,
+): Promise<void> {
+  const level = await content.level(levelId);
+  if (!level?.active || level.is_archived || level.archive_year_id !== null) {
+    return showAdminScopeLevels(ctx, userId, type);
+  }
+  if (type === "level") {
+    return addAdminScope(ctx, userId, "level", levelId);
+  }
+  if (type === "department") {
+    const departments = await content.departments(levelId);
+    const keyboard = new InlineKeyboard();
+    for (const department of departments) {
+      keyboard
+        .text(
+          buttonLabel(`🏛️ ${department.title}`),
+          `adm:usrdp:${userId}:${department.id}`,
+        )
+        .row();
+    }
+    withNavigation(keyboard, `adm:usrpick:${userId}:department`, "adm:home");
+    return show(
+      ctx,
+      section(
+        `أقسام ${level.title}`,
+        departments.length ? "اختر القسم." : "لا توجد أقسام في هذه الفرقة.",
+      ),
+      keyboard,
+    );
+  }
+  const terms = await content.terms(levelId);
+  const keyboard = new InlineKeyboard();
+  for (const term of terms) {
+    keyboard
+      .text(
+        displayTermTitle(term.title),
+        `adm:usrtr:${userId}:${type}:${term.id}`,
+      )
+      .row();
+  }
+  withNavigation(keyboard, `adm:usrpick:${userId}:${type}`, "adm:home");
   return show(
     ctx,
-    section("إدارة الملفات", "اختر الفرقة ثم الترم والمقرر ومجلد المحتوى."),
+    section(
+      `ترمات ${level.title}`,
+      terms.length ? "اختر الترم." : "لا توجد ترمات في هذه الفرقة.",
+    ),
+    keyboard,
+  );
+}
+
+async function showAdminScopeTermTarget(
+  ctx: Context,
+  userId: number,
+  type: ScopeTargetType,
+  termId: number,
+): Promise<void> {
+  const term = await content.term(termId);
+  const level = term ? await content.level(term.level_id) : undefined;
+  if (
+    !term?.active ||
+    !level?.active ||
+    level.is_archived ||
+    level.archive_year_id !== null
+  ) {
+    return showAdminScopeTypes(ctx, userId);
+  }
+  if (type === "term") {
+    return addAdminScope(ctx, userId, "term", termId);
+  }
+  if (type !== "course") {
+    return showAdminScopeTypes(ctx, userId);
+  }
+  const courses = await content.courses(termId);
+  const keyboard = new InlineKeyboard();
+  for (const course of courses) {
+    keyboard
+      .text(buttonLabel(course.title), `adm:ursc:${userId}:${course.id}`)
+      .row();
+  }
+  withNavigation(
+    keyboard,
+    `adm:usrlv:${userId}:course:${level.id}`,
+    "adm:home",
+  );
+  await show(
+    ctx,
+    section(
+      `مقررات ${displayTermTitle(term.title)}`,
+      courses.length ? "اختر المقرر." : "لا توجد مقررات في هذا الترم.",
+    ),
+    keyboard,
+  );
+}
+
+async function addAdminScope(
+  ctx: Context,
+  userId: number,
+  type: ScopeTargetType,
+  targetId: number,
+): Promise<void> {
+  try {
+    await access.addScope(userId, { type, id: targetId });
+  } catch (error) {
+    console.error("Could not add content admin scope:", error);
+    return showAdminStaffMember(
+      ctx,
+      userId,
+      "تعذر إضافة النطاق. تأكد أن العنصر ما زال ضمن المحتوى الحالي.",
+    );
+  }
+  return showAdminStaffMember(ctx, userId, "تمت إضافة النطاق.");
+}
+
+async function removeAdminScope(
+  ctx: Context,
+  userId: number,
+  scopeId: number,
+): Promise<void> {
+  await access.removeScope(userId, scopeId);
+  return showAdminStaffMember(ctx, userId, "تمت إزالة النطاق.");
+}
+
+async function showAdminResourceLevels(ctx: Context): Promise<void> {
+  const levels = ctx.from ? await access.manageableLevels(ctx.from.id) : [];
+  return show(
+    ctx,
+    section(
+      "إدارة الملفات",
+      levels.length
+        ? "اختر الفرقة ثم الترم والمقرر ومجلد المحتوى."
+        : "لا توجد مقررات مسندة إلى صلاحيتك الحالية.",
+    ),
     levelsKeyboard(levels, "mg:l", "adm:home", "adm:home"),
   );
 }
@@ -963,6 +1415,9 @@ async function showAdminResourceGroups(
   folderId: number,
   page = 0,
 ): Promise<void> {
+  if (!ctx.from || !(await access.canManageCourse(ctx.from.id, courseId))) {
+    return showForbidden(ctx);
+  }
   const total = await content.countResourceGroups(courseId, folderId);
   const pageCount = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE));
   const safePage = Math.min(Math.max(0, page), pageCount - 1);
@@ -1019,6 +1474,12 @@ async function showAdminResourceGroup(
 ): Promise<void> {
   const group = await content.resourceGroup(groupId);
   if (!group) return showAdminResourceLevels(ctx);
+  if (
+    !ctx.from ||
+    !(await access.canManageCourse(ctx.from.id, group.course_id))
+  ) {
+    return showForbidden(ctx);
+  }
   if (
     !(await isCurrentCourse(group.course_id)) ||
     !(await content.folders()).some((folder) => folder.id === group.folder_id)
@@ -1120,6 +1581,8 @@ async function routeManageCallback(
   const other = Number(otherRaw);
   const page = pageRaw === undefined ? 0 : Number(pageRaw);
   const extra = extraRaw === undefined ? 0 : Number(extraRaw);
+  const userId = ctx.from?.id;
+  if (!userId) return;
 
   if (action === "home") {
     if (ctx.from) await users.clearState(ctx.from.id);
@@ -1144,32 +1607,47 @@ async function routeManageCallback(
     if (
       !group ||
       !(await isCurrentCourse(group.course_id)) ||
+      !(await access.canManageCourse(userId, group.course_id)) ||
       !(await content.folders()).some((folder) => folder.id === group.folder_id)
     ) {
-      return showAdminResourceLevels(ctx);
+      return showForbidden(ctx);
     }
   }
   if (action === "l" && Number.isSafeInteger(id)) {
     const level = await content.level(id);
-    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
-      return showAdminResourceLevels(ctx);
+    if (
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null ||
+      !(await access.canManageLevel(userId, id))
+    ) {
+      return showForbidden(ctx);
     }
     return show(
       ctx,
       section(`إدارة ملفات ${level.title}`, "اختر الترم الدراسي."),
-      termsKeyboard(await content.terms(id), "mg:t", "adm:home", "adm:home"),
+      termsKeyboard(
+        await access.manageableTerms(userId, id),
+        "mg:t",
+        "adm:home",
+        "adm:home",
+      ),
     );
   }
   if (action === "t" && Number.isSafeInteger(id)) {
     const term = await content.term(id);
-    if (!term?.active || !(await isCurrentCourseParentLevel(term.level_id))) {
-      return showAdminResourceLevels(ctx);
+    if (
+      !term?.active ||
+      !(await isCurrentCourseParentLevel(term.level_id)) ||
+      !(await access.canManageTerm(userId, id))
+    ) {
+      return showForbidden(ctx);
     }
     return show(
       ctx,
       section(`إدارة ملفات ${displayTermTitle(term.title)}`, "اختر المقرر."),
       coursesKeyboard(
-        await content.courses(id),
+        await access.manageableCourses(userId, id),
         "mg:c",
         `mg:l:${term.level_id}`,
         "adm:home",
@@ -1177,7 +1655,12 @@ async function routeManageCallback(
     );
   }
   if (action === "c" && Number.isSafeInteger(id)) {
-    if (!(await isCurrentCourse(id))) return showAdminResourceLevels(ctx);
+    if (
+      !(await isCurrentCourse(id)) ||
+      !(await access.canManageCourse(userId, id))
+    ) {
+      return showForbidden(ctx);
+    }
     const course = await content.course(id);
     if (!course) return showAdminResourceLevels(ctx);
     const folders = await content.folders();
@@ -1199,7 +1682,12 @@ async function routeManageCallback(
     Number.isSafeInteger(page) &&
     page >= 0
   ) {
-    if (!(await isCurrentCourse(id))) return showAdminResourceLevels(ctx);
+    if (
+      !(await isCurrentCourse(id)) ||
+      !(await access.canManageCourse(userId, id))
+    ) {
+      return showForbidden(ctx);
+    }
     const folder = (await content.folders()).find((item) => item.id === other);
     if (!folder) return showAdminResourceLevels(ctx);
     return showAdminResourceGroups(ctx, id, other, page);
@@ -1856,13 +2344,104 @@ async function routeAdminCallback(
   ctx: Context,
   parts: string[],
 ): Promise<void> {
-  const [, action, raw, extra] = parts;
+  const [, action, raw, extra, extra2] = parts;
   const id = Number(raw);
+  const userId = ctx.from?.id;
+  if (!userId) return;
+  if (!isSuperAdmin(userId) && !CONTENT_ADMIN_ACTIONS.has(action ?? "")) {
+    return showForbidden(ctx);
+  }
   if (action === "home") {
-    if (ctx.from) await users.clearState(ctx.from.id);
+    await users.clearState(userId);
     return showAdmin(ctx);
   }
   if (action === "student") return sendHome(ctx);
+  if (action === "staff") return showAdminStaff(ctx);
+  if (action === "staffadd") {
+    const state: GrantAdminState = { kind: "grant-admin", step: "id" };
+    await users.setState(userId, state);
+    return promptGrantAdminStep(ctx, state);
+  }
+  if (action === "staffskip" && isGrantOptionalStep(raw)) {
+    const state = await users.getState(userId);
+    if (state?.kind !== "grant-admin" || state.step !== raw) {
+      return showAdminStaff(ctx);
+    }
+    return skipGrantAdminStep(ctx, userId, state);
+  }
+  if (action === "usr" && Number.isSafeInteger(id)) {
+    return showAdminStaffMember(ctx, id);
+  }
+  if (action === "usrrevoke" && Number.isSafeInteger(id)) {
+    const keyboard = new InlineKeyboard()
+      .text("نعم، ألغِ الصلاحية", `adm:usrrevokec:${id}`)
+      .row()
+      .text("إلغاء", `adm:usr:${id}`);
+    withNavigation(keyboard, "adm:staff", "adm:home");
+    return show(
+      ctx,
+      section(
+        "تأكيد إلغاء الصلاحية",
+        "سيفقد هذا المستخدم الوصول إلى لوحة إدارة المحتوى فورًا.",
+      ),
+      keyboard,
+    );
+  }
+  if (action === "usrrevokec" && Number.isSafeInteger(id)) {
+    await access.revokeContentAdmin(id);
+    return showAdminStaff(ctx, "تم إلغاء صلاحية مشرف المحتوى.");
+  }
+  if (action === "usrmode" && Number.isSafeInteger(id) && extra === "all") {
+    await access.setAllCourses(id, true);
+    return showAdminStaffMember(ctx, id, "تم منح الوصول لكل المقررات الحالية.");
+  }
+  if (action === "usrscope" && Number.isSafeInteger(id)) {
+    return showAdminScopeTypes(ctx, id);
+  }
+  if (
+    action === "usrpick" &&
+    Number.isSafeInteger(id) &&
+    isScopeTargetType(extra)
+  ) {
+    return showAdminScopeLevels(ctx, id, extra);
+  }
+  if (
+    action === "usrlv" &&
+    Number.isSafeInteger(id) &&
+    isScopeTargetType(extra) &&
+    Number.isSafeInteger(Number(extra2))
+  ) {
+    return showAdminScopeLevelTarget(ctx, id, extra, Number(extra2));
+  }
+  if (
+    action === "usrtr" &&
+    Number.isSafeInteger(id) &&
+    isScopeTargetType(extra) &&
+    Number.isSafeInteger(Number(extra2))
+  ) {
+    return showAdminScopeTermTarget(ctx, id, extra, Number(extra2));
+  }
+  if (
+    action === "usrdp" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    return addAdminScope(ctx, id, "department", Number(extra));
+  }
+  if (
+    action === "ursc" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    return addAdminScope(ctx, id, "course", Number(extra));
+  }
+  if (
+    action === "usrsdel" &&
+    Number.isSafeInteger(id) &&
+    Number.isSafeInteger(Number(extra))
+  ) {
+    return removeAdminScope(ctx, id, Number(extra));
+  }
   if (action === "levels") return showAdminLevels(ctx);
   if (action === "departments" && Number.isSafeInteger(id))
     return showAdminDepartments(ctx, id);
@@ -1912,10 +2491,15 @@ async function routeAdminCallback(
   if (action === "folders") return showAdminFolders(ctx);
   if (action === "archive") return showAdminArchives(ctx);
   if (action === "upload") {
-    const levels = await content.currentLevels();
+    const levels = await access.manageableLevels(userId);
     return show(
       ctx,
-      section("إضافة موارد", "اختر الفرقة ثم الترم والمقرر ومجلد الوجهة."),
+      section(
+        "إضافة موارد",
+        levels.length
+          ? "اختر الفرقة ثم الترم والمقرر ومجلد الوجهة."
+          : "لا توجد مقررات مسندة إلى صلاحيتك الحالية.",
+      ),
       levelsKeyboard(levels, "up:l", "adm:home", "adm:home"),
     );
   }
@@ -2260,12 +2844,19 @@ async function routeUploadCallback(
 ): Promise<void> {
   const [, action, raw, otherRaw] = parts;
   const id = Number(raw);
+  const userId = ctx.from?.id;
+  if (!userId) return;
   if (action === "l" && Number.isSafeInteger(id)) {
     const level = await content.level(id);
-    if (!level?.active || level.is_archived || level.archive_year_id !== null) {
-      return showAdmin(ctx);
+    if (
+      !level?.active ||
+      level.is_archived ||
+      level.archive_year_id !== null ||
+      !(await access.canManageLevel(userId, id))
+    ) {
+      return showForbidden(ctx);
     }
-    const terms = await content.terms(id);
+    const terms = await access.manageableTerms(userId, id);
     return show(
       ctx,
       section("إضافة موارد", "اختر الترم الدراسي."),
@@ -2279,11 +2870,12 @@ async function routeUploadCallback(
       !term?.active ||
       !level?.active ||
       level.is_archived ||
-      level.archive_year_id !== null
+      level.archive_year_id !== null ||
+      !(await access.canManageTerm(userId, id))
     ) {
-      return showAdmin(ctx);
+      return showForbidden(ctx);
     }
-    const courses = await content.courses(id);
+    const courses = await access.manageableCourses(userId, id);
     return show(
       ctx,
       section("إضافة موارد", "اختر المقرر."),
@@ -2299,15 +2891,16 @@ async function routeUploadCallback(
       !term?.active ||
       !level?.active ||
       level.is_archived ||
-      level.archive_year_id !== null
+      level.archive_year_id !== null ||
+      !(await access.canManageCourse(userId, id))
     ) {
-      return showAdmin(ctx);
+      return showForbidden(ctx);
     }
     const folders = await content.folders();
     return show(
       ctx,
       section("وجهة الملفات", "اختر المجلد الذي ستُحفظ فيه الملفات."),
-      foldersKeyboard(folders, `up:f:${id}`, `adm:cr:${id}`, "adm:home"),
+      foldersKeyboard(folders, `up:f:${id}`, `up:c:${id}`, "adm:home"),
     );
   }
   if (
@@ -2317,7 +2910,12 @@ async function routeUploadCallback(
   ) {
     const courseId = id;
     const folderId = Number(otherRaw);
-    if (!(await isCurrentCourse(courseId))) return showAdmin(ctx);
+    if (
+      !(await isCurrentCourse(courseId)) ||
+      !(await access.canManageCourse(userId, courseId))
+    ) {
+      return showForbidden(ctx);
+    }
     if (!(await content.folders()).some((folder) => folder.id === folderId)) {
       return showAdmin(ctx);
     }
@@ -2342,19 +2940,22 @@ async function routeUploadCallback(
     Number.isSafeInteger(Number(otherRaw))
   ) {
     const folderId = Number(otherRaw);
-    if (!(await isCurrentCourse(id))) return showAdmin(ctx);
+    if (
+      !(await isCurrentCourse(id)) ||
+      !(await access.canManageCourse(userId, id))
+    ) {
+      return showForbidden(ctx);
+    }
     const folder = (await content.folders()).find(
       (item) => item.id === folderId,
     );
     if (!folder) return showAdmin(ctx);
-    if (ctx.from) {
-      await users.setState(ctx.from.id, {
-        kind: "upload-title",
-        courseId: id,
-        folderId,
-        mode: action === "single" ? "single" : "multipart",
-      });
-    }
+    await users.setState(userId, {
+      kind: "upload-title",
+      courseId: id,
+      folderId,
+      mode: action === "single" ? "single" : "multipart",
+    });
     return show(
       ctx,
       section(
@@ -2491,7 +3092,9 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     return show(
       ctx,
       section("تم إلغاء العملية"),
-      isAdmin(userId) ? adminNavigation("adm:home") : navigation("nav:home"),
+      (await access.canAccessAdmin(userId))
+        ? adminNavigation("adm:home")
+        : navigation("nav:home"),
     );
   }
   if (message.text === "/done" && state.kind === "upload") {
@@ -2522,7 +3125,12 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     );
   }
   if (state.kind === "replace-resource") {
-    if (!isAdmin(userId)) {
+    const group = await content.resourceGroup(state.groupId);
+    if (
+      !group ||
+      !(await isCurrentCourse(group.course_id)) ||
+      !(await access.canManageCourse(userId, group.course_id))
+    ) {
       await users.clearState(userId);
       await ctx.reply("انتهت صلاحية هذه العملية.");
       return;
@@ -2551,7 +3159,10 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     );
   }
   if (state.kind === "upload-title") {
-    if (!isAdmin(userId)) {
+    if (
+      !(await isCurrentCourse(state.courseId)) ||
+      !(await access.canManageCourse(userId, state.courseId))
+    ) {
       await users.clearState(userId);
       await ctx.reply("انتهت صلاحية هذه العملية.");
       return;
@@ -2585,10 +3196,25 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     );
   }
   if (state.kind === "upload") {
-    if (!isAdmin(userId)) {
+    if (
+      !(await isCurrentCourse(state.courseId)) ||
+      !(await access.canManageCourse(userId, state.courseId))
+    ) {
       await users.clearState(userId);
       await ctx.reply("انتهت صلاحية هذه العملية.");
       return;
+    }
+    if (state.groupId !== undefined) {
+      const group = await content.resourceGroup(state.groupId);
+      if (
+        !group ||
+        group.course_id !== state.courseId ||
+        group.folder_id !== state.folderId
+      ) {
+        await users.clearState(userId);
+        await ctx.reply("انتهت صلاحية هذه العملية.");
+        return;
+      }
     }
     const file = incomingFile(ctx);
     const url = file ? undefined : incomingHttpUrl(message.text);
@@ -2737,7 +3363,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     await ctx.reply(
       `وصل ${categoryLabels[category]} إلى فريق AGR Study. شكرًا لمساهمتك.`,
       {
-        reply_markup: isAdmin(userId)
+        reply_markup: (await access.canAccessAdmin(userId))
           ? adminNavigation("adm:home")
           : navigation("nav:home"),
       },
@@ -2783,10 +3409,94 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
       keyboard,
     );
   }
-  if (state.kind === "text") {
-    if (!isAdmin(userId)) {
+  if (state.kind === "grant-admin") {
+    if (!isSuperAdmin(userId)) {
       await users.clearState(userId);
-      await ctx.reply("هذا الإجراء مخصص للإدارة.");
+      await ctx.reply("هذا الإجراء مخصص للإدارة العامة.");
+      return;
+    }
+    const text = message.text?.trim();
+    if (!text || text.startsWith("/")) {
+      await ctx.reply("أرسل القيمة المطلوبة، أو استخدم /cancel للإلغاء.");
+      return;
+    }
+    if (state.step === "id") {
+      const targetUserId = Number(text);
+      if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+        await ctx.reply(
+          "أرسل معرّف Telegram الرقمي الصحيح، أو استخدم /cancel للإلغاء.",
+        );
+        return;
+      }
+      if (isSuperAdmin(targetUserId)) {
+        await ctx.reply("هذا المستخدم مشرف عام بالفعل ويملك جميع الصلاحيات.");
+        return;
+      }
+      const next: GrantAdminState = {
+        kind: "grant-admin",
+        step: "name",
+        targetUserId,
+      };
+      await users.setState(userId, next);
+      return promptGrantAdminStep(ctx, next);
+    }
+    if (state.step === "name") {
+      if (text.length > 100) {
+        await ctx.reply("الاسم طويل جدًا. استخدم 100 حرف أو أقل.");
+        return;
+      }
+      const next: GrantAdminState = { ...state, step: "phone", fullName: text };
+      await users.setState(userId, next);
+      return promptGrantAdminStep(ctx, next);
+    }
+    if (state.step === "phone") {
+      if (text === "-" || text === "تخطي") {
+        return skipGrantAdminStep(ctx, userId, state);
+      }
+      if (text.length > 32) {
+        await ctx.reply("رقم الهاتف طويل جدًا. استخدم 32 حرفًا أو أقل.");
+        return;
+      }
+      const next: GrantAdminState = { ...state, step: "telegram", phone: text };
+      await users.setState(userId, next);
+      return promptGrantAdminStep(ctx, next);
+    }
+    if (state.step === "telegram") {
+      if (text === "-" || text === "تخطي") {
+        return skipGrantAdminStep(ctx, userId, state);
+      }
+      const username = text.replace(/^@/, "");
+      if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(username)) {
+        await ctx.reply(
+          "أرسل اسم مستخدم صحيحًا مثل @username، أو اضغط «تخطي».",
+        );
+        return;
+      }
+      const next: GrantAdminState = {
+        ...state,
+        step: "notes",
+        telegramUsername: username,
+      };
+      await users.setState(userId, next);
+      return promptGrantAdminStep(ctx, next);
+    }
+    if (text === "-" || text === "تخطي") {
+      return skipGrantAdminStep(ctx, userId, state);
+    }
+    if (text.length > 500) {
+      await ctx.reply("الملاحظات طويلة جدًا. استخدم 500 حرف أو أقل.");
+      return;
+    }
+    return completeGrantAdmin(ctx, userId, { ...state, notes: text });
+  }
+  if (state.kind === "text") {
+    const superAdmin = isSuperAdmin(userId);
+    const contentAction =
+      state.action === "rename-resource-group" ||
+      state.action === "rename-resource-part";
+    if (!superAdmin && !contentAction) {
+      await users.clearState(userId);
+      await ctx.reply("هذا الإجراء مخصص للإدارة العامة.");
       return;
     }
     const title = message.text?.trim();
@@ -2863,9 +3573,18 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           section("تمت إضافة المجلد", title),
           adminNavigation("adm:folders"),
         );
-      case "rename-resource-group":
+      case "rename-resource-group": {
         if (state.entityId === undefined)
           throw new Error("Missing resource group for rename.");
+        const group = await content.resourceGroup(state.entityId);
+        if (
+          !group ||
+          !(await access.canManageCourse(userId, group.course_id))
+        ) {
+          await users.clearState(userId);
+          await ctx.reply("انتهت صلاحية هذه العملية.");
+          return;
+        }
         await study.renameResourceGroup(state.entityId, title);
         await users.clearState(userId);
         return showAdminResourceGroup(
@@ -2875,9 +3594,21 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           state.partPage,
           "تم تحديث عنوان المورد.",
         );
-      case "rename-resource-part":
+      }
+      case "rename-resource-part": {
         if (state.entityId === undefined || state.parentId === undefined)
           throw new Error("Missing resource part for rename.");
+        const group = await content.resourceGroup(state.parentId);
+        const part = await content.resource(state.entityId);
+        if (
+          !group ||
+          part?.group_id !== group.id ||
+          !(await access.canManageCourse(userId, group.course_id))
+        ) {
+          await users.clearState(userId);
+          await ctx.reply("انتهت صلاحية هذه العملية.");
+          return;
+        }
         await study.renameResourcePart(state.entityId, title);
         await users.clearState(userId);
         return showAdminResourceGroup(
@@ -2887,6 +3618,7 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
           state.partPage,
           "تم تحديث اسم الجزء.",
         );
+      }
       case "create-archive": {
         const archiveId = await study.createArchiveYear(title);
         await users.clearState(userId);
@@ -2927,9 +3659,9 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
     }
   }
   if (state.kind === "broadcast-message") {
-    if (!isAdmin(userId)) {
+    if (!isSuperAdmin(userId)) {
       await users.clearState(userId);
-      await ctx.reply("هذا الإجراء مخصص للإدارة.");
+      await ctx.reply("هذا الإجراء مخصص للإدارة العامة.");
       return;
     }
     await users.clearState(userId);
@@ -2967,7 +3699,10 @@ async function handleState(ctx: Context, state: AdminState): Promise<void> {
 bot.on("message", async (ctx) => {
   const text = ctx.message.text;
   if (text?.startsWith("/")) {
-    if (text === "/cancel" || (text === "/done" && isAdmin(ctx.from?.id))) {
+    if (
+      text === "/cancel" ||
+      (text === "/done" && (await access.canAccessAdmin(ctx.from?.id)))
+    ) {
       const state = ctx.from ? await users.getState(ctx.from.id) : undefined;
       if (
         state &&
